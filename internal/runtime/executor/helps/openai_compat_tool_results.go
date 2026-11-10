@@ -1,12 +1,13 @@
 package helps
 
 import (
-	"fmt"
+	"bytes"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -33,53 +34,38 @@ func ShouldNormalizeOpenAIToolResultsForModel(compat *config.OpenAICompatibility
 // and strips relayed tool result images for text-only compatibility models.
 // Text parts are preserved and image parts are replaced with a short marker.
 func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
-	if len(payload) == 0 {
-		return payload
-	}
-	doc := ojson.NewDoc(payload)
-	if !NormalizeOpenAIToolResultsTextOnlyDoc(doc) {
-		return payload
-	}
-	return doc.Bytes()
-}
-
-// NormalizeOpenAIToolResultsTextOnlyDoc converts tool message content to strings
-// and strips relayed tool result images in place on doc for text-only compatibility models.
-func NormalizeOpenAIToolResultsTextOnlyDoc(doc *ojson.Doc) bool {
-	if doc == nil || doc.Len() == 0 {
-		return false
-	}
-	messages := doc.Get("messages")
+	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
-		return false
+		return payload
 	}
 
 	rawList := messages.Array()
 	if len(rawList) == 0 {
-		return false
+		return payload
 	}
 
-	modified := false
+	newMessages := make([][]byte, 0, len(rawList))
 	replacedPlaceholderInCurrentTurn := false
-	omitted := make(map[int]bool)
 
 	for i := 0; i < len(rawList); i++ {
 		msg := rawList[i]
 		role := msg.Get("role").String()
+		msgBytes := []byte(msg.Raw)
 
 		switch role {
 		case "tool":
 			content := msg.Get("content")
-			if content.Exists() && content.Type != ojson.String {
-				if errSet := doc.Set(fmt.Sprintf("messages.%d.content", i), flattenOpenAIToolResultContent(content)); errSet == nil {
-					modified = true
+			if content.Exists() && content.Type != gjson.String {
+				if updated, errSet := sjson.SetBytes(msgBytes, "content", flattenOpenAIToolResultContent(content)); errSet == nil {
+					msgBytes = updated
 				}
-			} else if content.Exists() && content.Type == ojson.String && content.String() == claudeToolResultImagePlaceholder {
-				if errSet := doc.Set(fmt.Sprintf("messages.%d.content", i), openAIToolResultImageOmittedText); errSet == nil {
-					modified = true
+			} else if content.Exists() && content.Type == gjson.String && content.String() == claudeToolResultImagePlaceholder {
+				if updated, errSet := sjson.SetBytes(msgBytes, "content", openAIToolResultImageOmittedText); errSet == nil {
+					msgBytes = updated
 					replacedPlaceholderInCurrentTurn = true
 				}
 			}
+			newMessages = append(newMessages, msgBytes)
 
 		case "user":
 			content := msg.Get("content")
@@ -88,7 +74,7 @@ func NormalizeOpenAIToolResultsTextOnlyDoc(doc *ojson.Doc) bool {
 				hasRelayNotice := false
 				hasImages := false
 
-				content.ForEach(func(_, part ojson.Result) bool {
+				content.ForEach(func(_, part gjson.Result) bool {
 					if part.IsObject() {
 						if part.Get("type").String() == "text" && part.Get("text").String() == claudeToolResultImageRelayNotice {
 							hasRelayNotice = true
@@ -105,22 +91,19 @@ func NormalizeOpenAIToolResultsTextOnlyDoc(doc *ojson.Doc) bool {
 
 				if hasRelayNotice && hasImages {
 					if !replacedPlaceholderInCurrentTurn {
-						for j := i - 1; j >= 0; j-- {
-							if omitted[j] {
-								continue
-							}
-							prevRole := doc.Get(fmt.Sprintf("messages.%d.role", j)).String()
+						for j := len(newMessages) - 1; j >= 0; j-- {
+							prevRole := gjson.GetBytes(newMessages[j], "role").String()
 							if prevRole != "tool" {
 								break
 							}
-							prevContent := doc.Get(fmt.Sprintf("messages.%d.content", j)).String()
+							prevContent := gjson.GetBytes(newMessages[j], "content").String()
 							if !strings.Contains(prevContent, openAIToolResultImageOmittedText) {
 								newContent := prevContent + "\n\n" + openAIToolResultImageOmittedText
 								if prevContent == "" {
 									newContent = openAIToolResultImageOmittedText
 								}
-								if errSet := doc.Set(fmt.Sprintf("messages.%d.content", j), newContent); errSet == nil {
-									modified = true
+								if updated, errSet := sjson.SetBytes(newMessages[j], "content", newContent); errSet == nil {
+									newMessages[j] = updated
 								}
 							}
 							break
@@ -130,36 +113,37 @@ func NormalizeOpenAIToolResultsTextOnlyDoc(doc *ojson.Doc) bool {
 
 					if len(remainingParts) == 0 {
 						// Synthetic relay message contained only relayed images; omit entirely.
-						omitted[i] = true
-						modified = true
 						continue
 					}
 
 					rawArray := "[" + strings.Join(remainingParts, ",") + "]"
-					if errSetRaw := doc.SetRaw(fmt.Sprintf("messages.%d.content", i), rawArray); errSetRaw == nil {
-						modified = true
+					if updated, errSetRaw := sjson.SetRawBytes(msgBytes, "content", []byte(rawArray)); errSetRaw == nil {
+						msgBytes = updated
 					}
 				}
 			}
+			newMessages = append(newMessages, msgBytes)
 
 		default:
 			replacedPlaceholderInCurrentTurn = false
+			newMessages = append(newMessages, msgBytes)
 		}
 	}
 
-	if len(omitted) > 0 {
-		updatedList := doc.Get("messages").Array()
-		kept := make([][]byte, 0, len(updatedList)-len(omitted))
-		for idx, item := range updatedList {
-			if !omitted[idx] {
-				kept = append(kept, []byte(item.Raw))
-			}
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, m := range newMessages {
+		if i > 0 {
+			buf.WriteByte(',')
 		}
-		if errSetRaw := doc.SetRawBytes("messages", JoinRawJSONArray(kept)); errSetRaw != nil {
-			return false
-		}
+		buf.Write(m)
 	}
-	return modified
+	buf.WriteByte(']')
+
+	if updated, errSetRaw := sjson.SetRawBytes(payload, "messages", buf.Bytes()); errSetRaw == nil {
+		return updated
+	}
+	return payload
 }
 
 func openAICompatibilityModelExcludesImages(models []config.OpenAICompatibilityModel, model string) (bool, bool) {
@@ -213,14 +197,14 @@ func normalizeOpenAICompatibilityModelName(model string) string {
 	return strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
 }
 
-func flattenOpenAIToolResultContent(content ojson.Result) string {
-	if content.Type == ojson.String {
+func flattenOpenAIToolResultContent(content gjson.Result) string {
+	if content.Type == gjson.String {
 		return content.String()
 	}
 
 	if content.IsArray() {
 		parts := make([]string, 0, 4)
-		content.ForEach(func(_, item ojson.Result) bool {
+		content.ForEach(func(_, item gjson.Result) bool {
 			if part, ok := openAIToolResultPartText(item); ok {
 				parts = append(parts, part)
 			}
@@ -233,7 +217,7 @@ func flattenOpenAIToolResultContent(content ojson.Result) string {
 		if isOpenAIImageToolResultPart(content) {
 			return openAIToolResultImageOmittedText
 		}
-		if text := content.Get("text"); text.Type == ojson.String {
+		if text := content.Get("text"); text.Type == gjson.String {
 			return text.String()
 		}
 	}
@@ -241,15 +225,15 @@ func flattenOpenAIToolResultContent(content ojson.Result) string {
 	return content.Raw
 }
 
-func openAIToolResultPartText(item ojson.Result) (string, bool) {
-	if item.Type == ojson.String {
+func openAIToolResultPartText(item gjson.Result) (string, bool) {
+	if item.Type == gjson.String {
 		return item.String(), true
 	}
 	if item.IsObject() {
 		if isOpenAIImageToolResultPart(item) {
 			return openAIToolResultImageOmittedText, true
 		}
-		if text := item.Get("text"); text.Type == ojson.String {
+		if text := item.Get("text"); text.Type == gjson.String {
 			return text.String(), true
 		}
 	}
@@ -259,7 +243,7 @@ func openAIToolResultPartText(item ojson.Result) (string, bool) {
 	return item.Raw, true
 }
 
-func isOpenAIImageToolResultPart(item ojson.Result) bool {
+func isOpenAIImageToolResultPart(item gjson.Result) bool {
 	if !item.IsObject() {
 		return false
 	}

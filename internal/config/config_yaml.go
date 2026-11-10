@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -12,11 +11,8 @@ import (
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
-// Existing v8 documents are saved in the latest layout. Successful migration
-// also synchronizes cfg's OAuth scope for runtime snapshots.
-func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
+func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	persistCfg := cfg
-	migrating := len(migrateV8) > 0 && migrateV8[0]
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -33,17 +29,9 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	if original.Content[0] == nil || original.Content[0].Kind != yaml.MappingNode {
 		return fmt.Errorf("expected root mapping node")
 	}
-	layout := deepCopyNode(original.Content[0])
-	flat, err := flattenV8(layout)
-	if err != nil {
-		return err
-	}
-	original.Content[0] = flat
-	layout = expandConfigAliases(layout)
-	migrating = migrating || IsV8ConfigLayout(layout)
 
 	// Marshal the current cfg to YAML, then unmarshal to a yaml.Node we can merge from.
-	rendered, err := yaml.Marshal((*legacyConfig)(persistCfg))
+	rendered, err := yaml.Marshal(persistCfg)
 	if err != nil {
 		return err
 	}
@@ -58,40 +46,27 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 		return fmt.Errorf("expected generated root mapping node")
 	}
 
-	// Keep obsolete roots until v8 migration can preserve them as comments.
-	if !migrating {
-		removeLegacyAuthBlock(original.Content[0])
-		removeRemovedIntegrationKeys(original.Content[0])
-		removeLegacyGenerativeLanguageKeys(original.Content[0])
-	}
+	// Remove deprecated sections before merging back the sanitized config.
+	removeLegacyAuthBlock(original.Content[0])
 	removeLegacyOpenAICompatAPIKeys(original.Content[0])
+	removeRemovedIntegrationKeys(original.Content[0])
+	removeLegacyGenerativeLanguageKeys(original.Content[0])
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-request-scoped-errors")
-	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-settings")
 	replacePluginConfigsSubtree(original.Content[0], generated.Content[0])
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
-	if err = restoreV8Layout(original.Content[0], layout, data, generated.Content[0]); err != nil {
+	normalizeCollectionNodeStyles(original.Content[0])
+
+	// Write back.
+	f, err := os.Create(configFile)
+	if err != nil {
 		return err
 	}
-	if !migrating {
-		// Keep historical client fields at their original legacy paths. Otherwise
-		// the generated client path makes the next v0 save look like a v8 file.
-		for _, alias := range v8ClientPaths {
-			if yamlPath(layout, alias.old) == nil || yamlPath(layout, alias.current) != nil || yamlPath(original.Content[0], alias.current) == nil {
-				continue
-			}
-			copy := copyYAMLPathValue(original.Content[0], alias.current)
-			deleteYAMLPath(original.Content[0], alias.current)
-			setYAMLPathWithComments(original.Content[0], alias.old, copy)
-		}
-	}
-	NormalizeCollectionNodeStyles(original.Content[0])
-
-	// Encode and validate the layout before opening the destination for writing.
+	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -103,25 +78,8 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 		return err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	var migrated *Config
-	if migrating {
-		data, _, err = NormalizeConfigLayout(data, true)
-		if err != nil {
-			return err
-		}
-		migrated = new(Config)
-		if err = yaml.Unmarshal(data, migrated); err != nil {
-			return fmt.Errorf("decode migrated config: %w", err)
-		}
-	}
-	if err = os.WriteFile(configFile, data, 0600); err != nil {
-		return err
-	}
-	if migrated != nil {
-		// Keep runtime-only values intact and publish scope only after the write succeeds.
-		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
-	}
-	return nil
+	_, err = f.Write(data)
+	return err
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
@@ -131,30 +89,13 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 	if err != nil {
 		return err
 	}
-	data, err = updateNestedScalarYAML(data, path, value)
-	if err != nil {
+	var root yaml.Node
+	if err = yaml.Unmarshal(data, &root); err != nil {
 		return err
 	}
-	return os.WriteFile(configFile, data, 0600)
-}
-
-// updateNestedScalarYAML returns data with the nested scalar key path like ["a","b"] set to
-// value, preserving comments and positions.
-func updateNestedScalarYAML(data []byte, path []string, value string) ([]byte, error) {
-	var root yaml.Node
-	if errUnmarshal := yaml.Unmarshal(data, &root); errUnmarshal != nil {
-		return nil, errUnmarshal
-	}
 	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid yaml document structure")
+		return fmt.Errorf("invalid yaml document structure")
 	}
-	// Resolve aliases and merge keys before updating a path. Otherwise replacing
-	// an alias with a mapping drops inherited siblings or mutates a shared anchor.
-	var decoded map[string]any
-	if errDecode := root.Decode(&decoded); errDecode != nil {
-		return nil, errDecode
-	}
-	root.Content[0] = expandConfigAliases(root.Content[0])
 	node := root.Content[0]
 	// descend mapping nodes following path
 	for i, key := range path {
@@ -173,17 +114,24 @@ func updateNestedScalarYAML(data []byte, path []string, value string) ([]byte, e
 			node = next
 		}
 	}
+	f, err := os.Create(configFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if errEncode := enc.Encode(&root); errEncode != nil {
+	if err = enc.Encode(&root); err != nil {
 		_ = enc.Close()
-		return nil, errEncode
+		return err
 	}
-	if errClose := enc.Close(); errClose != nil {
-		return nil, errClose
+	if err = enc.Close(); err != nil {
+		return err
 	}
-	return NormalizeCommentIndentation(buf.Bytes()), nil
+	data = NormalizeCommentIndentation(buf.Bytes())
+	_, err = f.Write(data)
+	return err
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.
@@ -369,19 +317,6 @@ func appendPath(path []string, key string) []string {
 // isKnownDefaultValue returns true if the given node at the specified path
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
-//
-// Credential connection-pool blocks (enabled, idle-conn-timeout,
-// max-idle-conns-per-host) are deliberately absent from the pointer-backed
-// zero-value whitelist below. The pruning here only applies to keys that are new
-// to the destination document: a block already present on disk is merged into its
-// existing node and survives. So an empty block (connection-pool: {} is the opt-in
-// for the default pool), an explicit enabled: false, and an explicit
-// max-idle-conns-per-host: 0 all persist when the operator wrote them by hand or
-// through the v8 management API, which writes the YAML tree directly. The
-// remaining gap is a block that only exists in an in-memory Config, for example one
-// an SDK embedder adds through sdk/config.SaveConfigPreserveComments to a file that
-// never carried it: pruning drops those zero-valued sub-keys. No management
-// endpoint mutates ProxyConnectionPool, so that path is reachable only from code.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if isPluginConfigsSubtreePath(path) {
 		return false
@@ -396,14 +331,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		}
 	}
 
-	// Credential weights and retry overrides are pointer-backed: zero is explicit.
-	if len(path) > 0 && (path[len(path)-1] == "weight" || path[len(path)-1] == "request-retry") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
-		return false
-	}
-
-	// session-date-pin-days is pointer-backed: only an explicit zero is
-	// preserved; the default value must not pollute saves.
-	if len(path) > 0 && path[len(path)-1] == "session-date-pin-days" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" && node.Value == "0" {
+	// Weight is pointer-backed, so an explicit zero is meaningful and must be preserved.
+	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
 		return false
 	}
 
@@ -412,12 +341,15 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
-	// A parent mapping carrying an explicit session-date-pin-days value must
-	// survive the zero-value check below, or the new key is never written.
-	if node != nil && node.Kind == yaml.MappingNode {
-		if pinIdx := findMapKeyIndex(node, "session-date-pin-days"); pinIdx >= 0 {
+	fullPath := strings.Join(path, ".")
+	// A configured GLM quota with two null limits grants unlimited access.
+	switch fullPath {
+	case "clients.quotas":
+		if findMapKeyIndex(node, "glm") >= 0 {
 			return false
 		}
+	case "clients.quotas.glm", "clients.quotas.glm.five-hour-tokens", "clients.quotas.glm.weekly-tokens":
+		return false
 	}
 
 	// First check if it's a zero value
@@ -429,8 +361,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if len(path) == 0 {
 		return false
 	}
-
-	fullPath := strings.Join(path, ".")
 
 	// Check string defaults
 	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
@@ -451,8 +381,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
-		case "claude.session-date-pin-days":
-			return node.Value == strconv.Itoa(DefaultClaudeSessionDatePinDays)
 		}
 	}
 
@@ -793,9 +721,10 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, keyPath ...string)
 	}
 	srcIdx := findMapKeyIndex(srcRoot, key)
 	if srcIdx < 0 {
-		// Keep explicit OAuth maps when the last channel is removed. Their presence
-		// must survive saves and override legacy fields when restored to the v8 layout.
-		if key == "oauth-excluded-models" || key == "oauth-model-alias" || key == "oauth-request-scoped-errors" || key == "oauth-settings" {
+		// Keep an explicit empty mapping for oauth-model-alias and oauth-request-scoped-errors when previously present.
+		// When users delete the last channel via the management API,
+		// we want that deletion to persist across hot reloads and restarts.
+		if key == "oauth-model-alias" || key == "oauth-request-scoped-errors" {
 			dstRoot.Content[dstIdx+1] = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 			return
 		}
@@ -857,18 +786,15 @@ func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
 // This is strictly scoped to credential-nested mappings such as "cloak" and "headers" under
 // known credential sequence paths to prevent stale deleted keys from persisting while leaving
 // all other mappings and root sections unaffected.
-//
-// Credential connection-pool blocks stay out of this list on purpose. Pruning only runs while
-// merging a document from an in-memory Config, and a removed pool sub-key can mean either
-// "delete it" or "inherit the group value" depending on the caller; guessing wrong would silently
-// change pooling for a credential. Hand-edited files and v8 management saves therefore keep a
-// sub-key until the whole block is removed.
 func shouldPruneNestedMappingKeys(path []string) bool {
 	if len(path) < 2 {
 		return false
 	}
 	parent := path[len(path)-2]
 	last := path[len(path)-1]
+	if path[0] == "clients" && path[1] == "quotas" {
+		return true
+	}
 	switch parent {
 	case "claude-api-key":
 		return last == "cloak" || last == "headers"
@@ -879,30 +805,18 @@ func shouldPruneNestedMappingKeys(path []string) bool {
 	}
 }
 
-// NormalizeCollectionNodeStyles forces YAML collections to use block notation, keeping
+// normalizeCollectionNodeStyles forces YAML collections to use block notation, keeping
 // lists and maps readable. Empty sequences retain flow style ([]) so empty list markers
-// remain compact. It also clears double quotes from string mapping keys so JSON-derived
-// keys render as standard unquoted YAML keys.
-func NormalizeCollectionNodeStyles(node *yaml.Node) {
+// remain compact.
+func normalizeCollectionNodeStyles(node *yaml.Node) {
 	if node == nil {
 		return
 	}
 	switch node.Kind {
-	case yaml.DocumentNode:
-		for i := range node.Content {
-			NormalizeCollectionNodeStyles(node.Content[i])
-		}
 	case yaml.MappingNode:
 		node.Style = 0
-		for i := 0; i < len(node.Content); i += 2 {
-			key := node.Content[i]
-			if key != nil && key.Kind == yaml.ScalarNode && key.Tag == "!!str" && key.Style == yaml.DoubleQuotedStyle {
-				key.Style = 0
-			}
-			NormalizeCollectionNodeStyles(key)
-			if i+1 < len(node.Content) {
-				NormalizeCollectionNodeStyles(node.Content[i+1])
-			}
+		for i := range node.Content {
+			normalizeCollectionNodeStyles(node.Content[i])
 		}
 	case yaml.SequenceNode:
 		if len(node.Content) == 0 {
@@ -911,7 +825,7 @@ func NormalizeCollectionNodeStyles(node *yaml.Node) {
 			node.Style = 0
 		}
 		for i := range node.Content {
-			NormalizeCollectionNodeStyles(node.Content[i])
+			normalizeCollectionNodeStyles(node.Content[i])
 		}
 	default:
 		// Scalars keep their existing style to preserve quoting

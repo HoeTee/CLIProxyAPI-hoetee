@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 )
 
 // Quota exceeded toggles
@@ -35,7 +34,7 @@ func (h *Handler) ResetQuota(c *gin.Context) {
 		AuthIndex string `json:"auth_index"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&req); errBindJSON != nil {
-		c.JSON(clienterror.HTTPStatusFromErrorOr(errBindJSON, http.StatusBadRequest), gin.H{"error": "invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 

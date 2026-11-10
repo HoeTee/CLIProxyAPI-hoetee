@@ -6,11 +6,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type serverOptionConfig struct {
@@ -26,11 +26,18 @@ type serverOptionConfig struct {
 	postAuthPersistHook   auth.PostAuthHook
 	pluginHost            *pluginhost.Host
 	configReloadHook      func(context.Context, *config.Config)
+	configReloadReady     func() bool
 	exampleAPIKeySafeMode bool
+	usageHistoryPath      string
 }
 
 // ServerOption customises HTTP server construction.
 type ServerOption func(*serverOptionConfig)
+
+// WithUsageHistory enables persistent client usage history at the supplied database path.
+func WithUsageHistory(path string) ServerOption {
+	return func(cfg *serverOptionConfig) { cfg.usageHistoryPath = path }
+}
 
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
@@ -45,6 +52,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
 		return nil
 	}
 	sdkCfg := cfg.SDKConfig
+	sdkCfg.CodexOptimizeMultiAgentV2 = cfg.Codex.OptimizeMultiAgentV2
 	sdkCfg.CodexOrphanDelegationCompatibility = cfg.Codex.OrphanDelegationCompatibility
 	sdkCfg.CodexResponseSteering = cfg.Codex.ResponseSteering
 	if cfg.CommercialMode {
@@ -122,9 +130,13 @@ func WithPluginHost(host *pluginhost.Host) ServerOption {
 }
 
 // WithConfigReloadHook registers a callback used after management saves config changes.
-func WithConfigReloadHook(hook func(context.Context, *config.Config)) ServerOption {
+func WithConfigReloadHook(hook func(context.Context, *config.Config), ready ...func() bool) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.configReloadHook = hook
+		cfg.configReloadReady = nil
+		if len(ready) > 0 {
+			cfg.configReloadReady = ready[0]
+		}
 	}
 }
 

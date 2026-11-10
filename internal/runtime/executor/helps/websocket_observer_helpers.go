@@ -2,11 +2,10 @@ package helps
 
 import (
 	"context"
-	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
 
 // EmitWebSocketResponseEvent delivers an upstream WebSocket response frame to any configured observer.
@@ -20,7 +19,7 @@ func EmitWebSocketResponseEvent(ctx context.Context, opts cliproxyexecutor.Optio
 		authLabel = auth.Label
 		authType, _ = auth.AccountInfo()
 	}
-	eventType := strings.Clone(ojson.GetBytesNoCopy(payload, "type").String())
+	eventType := gjson.GetBytes(payload, "type").String()
 	var requestID string
 	var traceID string
 	if opts.Metadata != nil {

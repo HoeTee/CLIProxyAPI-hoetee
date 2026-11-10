@@ -3,7 +3,7 @@ package common
 import (
 	"testing"
 
-	"github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
 )
 
 func TestClaudeMessageAccumulatorGroupsAndOrdersAssistantParts(t *testing.T) {
@@ -16,7 +16,7 @@ func TestClaudeMessageAccumulatorGroupsAndOrdersAssistantParts(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("message count = %d, want 1", len(messages))
 	}
-	content := ojson.GetBytesNoCopy(messages[0], "content").Array()
+	content := gjson.GetBytes(messages[0], "content").Array()
 	wantTypes := []string{"thinking", "text", "tool_use", "tool_use"}
 	if len(content) != len(wantTypes) {
 		t.Fatalf("content count = %d, want %d. Message: %s", len(content), len(wantTypes), string(messages[0]))
@@ -44,16 +44,16 @@ func TestClaudeMessageAccumulatorPreservesUserOrderAndRoleBoundaries(t *testing.
 	if len(messages) != 2 {
 		t.Fatalf("message count = %d, want 2", len(messages))
 	}
-	if got := ojson.GetBytesNoCopy(messages[0], "role").String(); got != "user" {
+	if got := gjson.GetBytes(messages[0], "role").String(); got != "user" {
 		t.Fatalf("messages[0].role = %q, want user", got)
 	}
-	if got := ojson.GetBytesNoCopy(messages[0], "content.0.type").String(); got != "tool_result" {
+	if got := gjson.GetBytes(messages[0], "content.0.type").String(); got != "tool_result" {
 		t.Fatalf("first user block type = %q, want tool_result", got)
 	}
-	if got := ojson.GetBytesNoCopy(messages[0], "content.1.text").String(); got != "continue" {
+	if got := gjson.GetBytes(messages[0], "content.1.text").String(); got != "continue" {
 		t.Fatalf("second user block text = %q, want continue", got)
 	}
-	if got := ojson.GetBytesNoCopy(messages[1], "role").String(); got != "assistant" {
+	if got := gjson.GetBytes(messages[1], "role").String(); got != "assistant" {
 		t.Fatalf("messages[1].role = %q, want assistant", got)
 	}
 }
@@ -72,7 +72,7 @@ func TestClaudeMessageAccumulatorSkipsEmptyMessagesWithoutBreakingTurn(t *testin
 	if len(messages) != 1 {
 		t.Fatalf("message count = %d, want 1", len(messages))
 	}
-	if got := ojson.GetBytesNoCopy(messages[0], "content.#").Int(); got != 2 {
+	if got := gjson.GetBytes(messages[0], "content.#").Int(); got != 2 {
 		t.Fatalf("assistant content count = %d, want 2. Message: %s", got, string(messages[0]))
 	}
 }
@@ -87,10 +87,10 @@ func TestClaudeMessageAccumulatorFlushPreservesExplicitBoundary(t *testing.T) {
 	if len(messages) != 2 {
 		t.Fatalf("message count = %d, want 2", len(messages))
 	}
-	if got := ojson.GetBytesNoCopy(messages[0], "content.0.text").String(); got != "system reminder" {
+	if got := gjson.GetBytes(messages[0], "content.0.text").String(); got != "system reminder" {
 		t.Fatalf("first message text = %q, want system reminder", got)
 	}
-	if got := ojson.GetBytesNoCopy(messages[1], "content.0.text").String(); got != "question" {
+	if got := gjson.GetBytes(messages[1], "content.0.text").String(); got != "question" {
 		t.Fatalf("second message text = %q, want question", got)
 	}
 }
@@ -101,17 +101,17 @@ func TestClaudeMessageAccumulatorPreservesBlockCacheControl(t *testing.T) {
 	accumulator.Append([]byte(`{"role":"user","content":[{"type":"text","text":"fresh"}]}`))
 
 	messages := accumulator.Messages()
-	if got := ojson.GetBytesNoCopy(messages[0], "content.0.cache_control.type").String(); got != "ephemeral" {
+	if got := gjson.GetBytes(messages[0], "content.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("cache_control.type = %q, want ephemeral", got)
 	}
-	if ojson.GetBytesNoCopy(messages[0], "content.1.cache_control").Exists() {
+	if gjson.GetBytes(messages[0], "content.1.cache_control").Exists() {
 		t.Fatalf("second block should not have cache_control: %s", string(messages[0]))
 	}
 }
 
 func TestAlignClaudeToolResults(t *testing.T) {
 	t.Run("reorders permuted results while preserving non-result slots", func(t *testing.T) {
-		input := ojson.Parse(`[
+		input := gjson.Parse(`[
 			{"type":"tool_result","tool_use_id":"call_2","content":"two"},
 			{"type":"text","text":"extra user text"},
 			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
@@ -131,7 +131,7 @@ func TestAlignClaudeToolResults(t *testing.T) {
 			t.Fatalf("parts[2].tool_use_id = %q, want call_2", parts[2].Get("tool_use_id").String())
 		}
 
-		leadingTextInput := ojson.Parse(`[
+		leadingTextInput := gjson.Parse(`[
 			{"type":"text","text":"leading text"},
 			{"type":"tool_result","tool_use_id":"call_2","content":"two"},
 			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
@@ -153,7 +153,7 @@ func TestAlignClaudeToolResults(t *testing.T) {
 	})
 
 	t.Run("returns original content when count mismatches", func(t *testing.T) {
-		input := ojson.Parse(`[
+		input := gjson.Parse(`[
 			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
 		]`)
 		aligned := AlignClaudeToolResults(input, []string{"call_1", "call_2"})
@@ -163,7 +163,7 @@ func TestAlignClaudeToolResults(t *testing.T) {
 	})
 
 	t.Run("returns original content when id not found", func(t *testing.T) {
-		input := ojson.Parse(`[
+		input := gjson.Parse(`[
 			{"type":"tool_result","tool_use_id":"call_unknown","content":"unknown"},
 			{"type":"tool_result","tool_use_id":"call_1","content":"one"}
 		]`)
@@ -174,7 +174,7 @@ func TestAlignClaudeToolResults(t *testing.T) {
 	})
 
 	t.Run("returns original content for non-array", func(t *testing.T) {
-		input := ojson.Parse(`"text content"`)
+		input := gjson.Parse(`"text content"`)
 		aligned := AlignClaudeToolResults(input, []string{"call_1"})
 		if aligned.Raw != input.Raw {
 			t.Fatalf("aligned = %s, want %s", aligned.Raw, input.Raw)

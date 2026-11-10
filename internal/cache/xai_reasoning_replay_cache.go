@@ -2,16 +2,17 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/MoeForge/moego/ojson"
-	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -100,7 +101,7 @@ func StoreXAIReasoningReplayItems(ctx context.Context, modelName, sessionKey str
 			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errClient)
 			return XAIReasoningReplayStoreBackendError
 		}
-		raw, errMarshal := marshalReasoningReplayRawJSONArray(normalized)
+		raw, errMarshal := json.Marshal(normalized)
 		if errMarshal != nil {
 			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errMarshal)
 			return XAIReasoningReplayStoreBackendError
@@ -163,9 +164,8 @@ func GetXAIReasoningReplayItemsRequired(ctx context.Context, modelName, sessionK
 		if errGet != nil || !found {
 			return nil, false, errGet
 		}
-		homeItems, errUnmarshal := unmarshalReasoningReplayRawJSONArray(raw)
-		if errUnmarshal != nil {
-			log.Warnf("xai reasoning replay KV decode failed (please upgrade CLIProxyAPI): %v", errUnmarshal)
+		var homeItems [][]byte
+		if errUnmarshal := json.Unmarshal(raw, &homeItems); errUnmarshal != nil {
 			return nil, false, errUnmarshal
 		}
 		if _, errExpire := client.KVExpire(ctx, xaiReasoningReplayKVKey(modelName, sessionKey), XAIReasoningReplayCacheTTL); errExpire != nil {
@@ -248,7 +248,7 @@ func normalizeXAIReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 		normalizedItem, ok := normalizeXAIReasoningReplayItem(item)
 		if ok {
 			normalized = append(normalized, normalizedItem)
-			switch strings.TrimSpace(ojson.GetBytesNoCopy(normalizedItem, "type").String()) {
+			switch strings.TrimSpace(gjson.GetBytes(normalizedItem, "type").String()) {
 			case "reasoning", "function_call", "custom_tool_call":
 				hasReplayAnchor = true
 			}
@@ -258,7 +258,7 @@ func normalizeXAIReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 }
 
 func normalizeXAIReasoningReplayItem(item []byte) ([]byte, bool) {
-	itemResult := util.ParseGJSONBytesNoCopy(item)
+	itemResult := gjson.ParseBytes(item)
 	switch strings.TrimSpace(itemResult.Get("type").String()) {
 	case "reasoning":
 		return normalizeXAIReasoningReplayReasoningItem(itemResult)
@@ -273,9 +273,9 @@ func normalizeXAIReasoningReplayItem(item []byte) ([]byte, bool) {
 	}
 }
 
-func normalizeXAIReasoningReplayReasoningItem(itemResult ojson.Result) ([]byte, bool) {
+func normalizeXAIReasoningReplayReasoningItem(itemResult gjson.Result) ([]byte, bool) {
 	encryptedContentResult := itemResult.Get("encrypted_content")
-	if encryptedContentResult.Type != ojson.String {
+	if encryptedContentResult.Type != gjson.String {
 		return nil, false
 	}
 	encryptedContent := encryptedContentResult.String()
@@ -287,11 +287,11 @@ func normalizeXAIReasoningReplayReasoningItem(itemResult ojson.Result) ([]byte, 
 	}
 
 	normalized := []byte(`{"type":"reasoning","summary":[],"content":null}`)
-	normalized, _ = ojson.SetBytes(normalized, "encrypted_content", encryptedContent)
+	normalized, _ = sjson.SetBytes(normalized, "encrypted_content", encryptedContent)
 	return normalized, true
 }
 
-func normalizeXAIReasoningReplayMessageItem(itemResult ojson.Result) ([]byte, bool) {
+func normalizeXAIReasoningReplayMessageItem(itemResult gjson.Result) ([]byte, bool) {
 	if !strings.EqualFold(strings.TrimSpace(itemResult.Get("role").String()), "assistant") {
 		return nil, false
 	}
@@ -300,55 +300,57 @@ func normalizeXAIReasoningReplayMessageItem(itemResult ojson.Result) ([]byte, bo
 		return nil, false
 	}
 
-	doc := ojson.NewDocString(`{"type":"message","role":"assistant","content":[]}`)
+	normalized := []byte(`{"type":"message","role":"assistant","content":[]}`)
 	for _, part := range content.Array() {
 		partType := strings.TrimSpace(part.Get("type").String())
 		var nextPart []byte
 		switch partType {
 		case "output_text":
 			textValue := part.Get("text")
-			if textValue.Type != ojson.String {
+			if textValue.Type != gjson.String {
 				continue
 			}
 			nextPart = []byte(`{"type":"output_text","text":""}`)
-			nextPart, _ = ojson.SetBytes(nextPart, "text", textValue.String())
+			nextPart, _ = sjson.SetBytes(nextPart, "text", textValue.String())
 		case "refusal":
 			// Responses API refusal parts use the "refusal" field, not "text".
 			refusalValue := part.Get("refusal")
-			if refusalValue.Type != ojson.String {
+			if refusalValue.Type != gjson.String {
 				continue
 			}
 			nextPart = []byte(`{"type":"refusal","refusal":""}`)
-			nextPart, _ = ojson.SetBytes(nextPart, "refusal", refusalValue.String())
+			nextPart, _ = sjson.SetBytes(nextPart, "refusal", refusalValue.String())
 		default:
 			continue
 		}
-		if errSet := doc.SetRawBytes("content.-1", nextPart); errSet != nil {
+		updated, errSet := sjson.SetRawBytes(normalized, "content.-1", nextPart)
+		if errSet != nil {
 			return nil, false
 		}
+		normalized = updated
 	}
-	if len(doc.Get("content").Array()) == 0 {
+	if len(gjson.GetBytes(normalized, "content").Array()) == 0 {
 		return nil, false
 	}
-	return doc.Bytes(), true
+	return normalized, true
 }
 
-func normalizeXAIReasoningReplayFunctionCallItem(itemResult ojson.Result) ([]byte, bool) {
+func normalizeXAIReasoningReplayFunctionCallItem(itemResult gjson.Result) ([]byte, bool) {
 	callID := strings.TrimSpace(itemResult.Get("call_id").String())
 	name := strings.TrimSpace(itemResult.Get("name").String())
 	arguments := itemResult.Get("arguments")
-	if callID == "" || name == "" || arguments.Type != ojson.String {
+	if callID == "" || name == "" || arguments.Type != gjson.String {
 		return nil, false
 	}
 
-	doc := ojson.NewDocString(`{"type":"function_call"}`)
-	_ = doc.Set("call_id", callID)
-	_ = doc.Set("name", name)
-	_ = doc.Set("arguments", arguments.String())
-	return doc.Bytes(), true
+	normalized := []byte(`{"type":"function_call"}`)
+	normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
+	normalized, _ = sjson.SetBytes(normalized, "name", name)
+	normalized, _ = sjson.SetBytes(normalized, "arguments", arguments.String())
+	return normalized, true
 }
 
-func normalizeXAIReasoningReplayCustomToolCallItem(itemResult ojson.Result) ([]byte, bool) {
+func normalizeXAIReasoningReplayCustomToolCallItem(itemResult gjson.Result) ([]byte, bool) {
 	callID := strings.TrimSpace(itemResult.Get("call_id").String())
 	name := strings.TrimSpace(itemResult.Get("name").String())
 	input := itemResult.Get("input")
@@ -356,18 +358,18 @@ func normalizeXAIReasoningReplayCustomToolCallItem(itemResult ojson.Result) ([]b
 		return nil, false
 	}
 
-	doc := ojson.NewDocString(`{"type":"custom_tool_call","status":"completed"}`)
+	normalized := []byte(`{"type":"custom_tool_call","status":"completed"}`)
 	if status := strings.TrimSpace(itemResult.Get("status").String()); status != "" {
-		_ = doc.Set("status", status)
+		normalized, _ = sjson.SetBytes(normalized, "status", status)
 	}
-	_ = doc.Set("call_id", callID)
-	_ = doc.Set("name", name)
-	if input.Type == ojson.String {
-		_ = doc.Set("input", input.String())
+	normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
+	normalized, _ = sjson.SetBytes(normalized, "name", name)
+	if input.Type == gjson.String {
+		normalized, _ = sjson.SetBytes(normalized, "input", input.String())
 	} else {
-		_ = doc.SetRaw("input", input.Raw)
+		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte(input.Raw))
 	}
-	return doc.Bytes(), true
+	return normalized, true
 }
 
 func cloneXAIReasoningReplayItems(items [][]byte) [][]byte {

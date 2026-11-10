@@ -3,15 +3,14 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/htmlsanitize"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -247,12 +246,7 @@ func (h *Host) ServeManagementHTTP(w http.ResponseWriter, r *http.Request) bool 
 		var errRead error
 		body, errRead = io.ReadAll(r.Body)
 		if errRead != nil {
-			status := http.StatusBadRequest
-			var maxBytesErr *http.MaxBytesError
-			if errors.As(errRead, &maxBytesErr) {
-				status = http.StatusRequestEntityTooLarge
-			}
-			http.Error(w, "failed to read plugin management request body", status)
+			http.Error(w, "failed to read plugin management request body", http.StatusBadRequest)
 			return true
 		}
 		if errClose := r.Body.Close(); errClose != nil {

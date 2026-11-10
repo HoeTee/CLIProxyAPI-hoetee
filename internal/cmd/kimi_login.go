@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -39,7 +39,6 @@ func doKimiLoginWithProvider(cfg *config.Config, options *LoginOptions, provider
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
-		ProxyURL:  options.ProxyURL,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), provider, cfg, authOpts)

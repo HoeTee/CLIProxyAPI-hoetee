@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
 	"gopkg.in/yaml.v3"
 )
 
@@ -27,10 +27,7 @@ func validateCredentialWeightYAML(data []byte) error {
 	if len(document.Content) == 0 {
 		return nil
 	}
-	root, err := flattenV8(document.Content[0])
-	if err != nil {
-		return err
-	}
+	root := document.Content[0]
 	families := map[string]struct{}{
 		"gemini-api-key": {}, "interactions-api-key": {}, "claude-api-key": {},
 		"vertex-api-key": {}, "codex-api-key": {}, "xai-api-key": {}, "meta-api-key": {},

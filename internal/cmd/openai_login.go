@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -24,8 +24,6 @@ type LoginOptions struct {
 
 	// Prompt allows the caller to provide interactive input when needed.
 	Prompt func(prompt string) (string, error)
-
-	ProxyURL string
 }
 
 // DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.
@@ -50,7 +48,6 @@ func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
-		ProxyURL:     options.ProxyURL,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
 	}

@@ -1,7 +1,8 @@
 package common
 
 import (
-	"github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // DefaultSafetySettings returns the default Gemini safety configuration we attach to requests.
@@ -33,22 +34,14 @@ func DefaultSafetySettings() []map[string]string {
 // AttachDefaultSafetySettings ensures the default safety settings are present when absent.
 // The caller must provide the target JSON path (e.g. "safetySettings" or "request.safetySettings").
 func AttachDefaultSafetySettings(rawJSON []byte, path string) []byte {
-	if ojson.GetBytesNoCopy(rawJSON, path).Exists() {
+	if gjson.GetBytes(rawJSON, path).Exists() {
 		return rawJSON
 	}
 
-	out, err := ojson.SetBytes(rawJSON, path, DefaultSafetySettings())
+	out, err := sjson.SetBytes(rawJSON, path, DefaultSafetySettings())
 	if err != nil {
 		return rawJSON
 	}
 
 	return out
-}
-
-// AttachDefaultSafetySettingsDoc ensures the default safety settings are present on doc when absent.
-func AttachDefaultSafetySettingsDoc(doc *ojson.Doc, path string) {
-	if doc == nil || doc.Get(path).Exists() {
-		return
-	}
-	_ = doc.Set(path, DefaultSafetySettings())
 }

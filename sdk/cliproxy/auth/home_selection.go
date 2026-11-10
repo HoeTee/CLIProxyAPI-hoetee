@@ -9,8 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 )
 
 type executionResources struct {
@@ -18,8 +18,6 @@ type executionResources struct {
 	closed  bool
 	closers []func() error
 }
-
-type homeAttemptContextKey struct{}
 
 type attemptCancel struct {
 	cancel context.CancelFunc
@@ -41,18 +39,14 @@ type attemptCancels struct {
 }
 
 func (a *attemptCancels) Add(cancel context.CancelFunc) (func(), error) {
-	return a.addAttempt(&attemptCancel{cancel: cancel})
-}
-
-func (a *attemptCancels) addAttempt(attempt *attemptCancel) (func(), error) {
-	if a == nil || attempt == nil || attempt.cancel == nil {
+	if a == nil || cancel == nil {
 		return func() {}, executionregistry.ErrInvalidExecutionResource
 	}
 
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
-		attempt.Cancel()
+		cancel()
 		return func() {}, executionregistry.ErrRegistryNotAccepting
 	}
 	if a.cancels == nil {
@@ -60,6 +54,7 @@ func (a *attemptCancels) addAttempt(attempt *attemptCancel) (func(), error) {
 	}
 	a.next++
 	token := a.next
+	attempt := &attemptCancel{cancel: cancel}
 	a.cancels[token] = attempt
 	a.mu.Unlock()
 
@@ -75,10 +70,6 @@ func (a *attemptCancels) addAttempt(attempt *attemptCancel) (func(), error) {
 }
 
 func (a *attemptCancels) Close() error {
-	return a.close(nil)
-}
-
-func (a *attemptCancels) close(preserved *attemptCancel) error {
 	if a == nil {
 		return nil
 	}
@@ -94,9 +85,7 @@ func (a *attemptCancels) close(preserved *attemptCancel) error {
 	a.mu.Unlock()
 
 	for _, cancel := range cancels {
-		if cancel != preserved {
-			cancel.Cancel()
-		}
+		cancel.Cancel()
 	}
 	return nil
 }
@@ -149,13 +138,12 @@ func (r *executionResources) Close() error {
 
 // HomeDispatchSelection keeps a Home execution scope separate from its auth.
 type HomeDispatchSelection struct {
-	Auth                       *Auth
-	Executor                   ProviderExecutor
-	Provider                   string
-	CanonicalSessionID         string
-	ParentSessionID            string
-	modelInfo                  *registry.ModelInfo
-	configurationUpdateSupport *bool
+	Auth               *Auth
+	Executor           ProviderExecutor
+	Provider           string
+	CanonicalSessionID string
+	ParentSessionID    string
+	modelInfo          *registry.ModelInfo
 
 	authMu           sync.RWMutex
 	scope            *executionregistry.Scope
@@ -168,7 +156,6 @@ type HomeDispatchSelection struct {
 	retained         atomic.Bool
 	runtimeAuthBound atomic.Bool
 	ended            atomic.Bool
-	preservedAttempt atomic.Pointer[attemptCancel]
 }
 
 func newHomeDispatchSelection(auth *Auth, executor ProviderExecutor, provider string, scope *executionregistry.Scope) (*HomeDispatchSelection, error) {
@@ -178,15 +165,7 @@ func newHomeDispatchSelection(auth *Auth, executor ProviderExecutor, provider st
 
 	resources := &executionResources{}
 	attemptCancels := &attemptCancels{}
-	selection := &HomeDispatchSelection{
-		Auth:           auth,
-		Executor:       executor,
-		Provider:       strings.TrimSpace(provider),
-		scope:          scope,
-		resources:      resources,
-		attemptCancels: attemptCancels,
-	}
-	if errBind := resources.Add(func() error { return attemptCancels.close(selection.preservedAttempt.Load()) }); errBind != nil {
+	if errBind := resources.Add(attemptCancels.Close); errBind != nil {
 		_ = attemptCancels.Close()
 		scope.End("attempt_cancel_bind_failed")
 		return nil, errBind
@@ -196,7 +175,15 @@ func newHomeDispatchSelection(auth *Auth, executor ProviderExecutor, provider st
 		scope.End("resource_controller_bind_failed")
 		return nil, errBind
 	}
-	return selection, nil
+
+	return &HomeDispatchSelection{
+		Auth:           auth,
+		Executor:       executor,
+		Provider:       strings.TrimSpace(provider),
+		scope:          scope,
+		resources:      resources,
+		attemptCancels: attemptCancels,
+	}, nil
 }
 
 // Bind adds a resource to be closed when this selection ends or drains.
@@ -220,13 +207,12 @@ func (s *HomeDispatchSelection) AttemptContext(ctx context.Context) (context.Con
 		cancelAttempt()
 		return nil, func() {}, fmt.Errorf("Home dispatch selection has no attempt cancels")
 	}
-	attempt := &attemptCancel{cancel: cancelAttempt}
-	release, errAdd := s.attemptCancels.addAttempt(attempt)
+	release, errAdd := s.attemptCancels.Add(cancelAttempt)
 	if errAdd != nil {
 		cancelAttempt()
 		return nil, func() {}, errAdd
 	}
-	return context.WithValue(attemptCtx, homeAttemptContextKey{}, attempt), release, nil
+	return attemptCtx, release, nil
 }
 
 // Retain transfers selection ownership from a request to an execution session.
@@ -250,21 +236,6 @@ func (s *HomeDispatchSelection) Active() bool {
 // End closes all bound resources and releases the Home execution scope once.
 func (s *HomeDispatchSelection) End(reason string) {
 	_ = s.EndWithRelease(reason)
-}
-
-// EndWebsocketTurn releases a selection whose websocket was lost while the attempt of ctx
-// still has to deliver the turn error: that attempt is not cancelled. Its own release
-// (or the request context) ends it.
-func (s *HomeDispatchSelection) EndWebsocketTurn(ctx context.Context, reason string) {
-	if s == nil {
-		return
-	}
-	if ctx != nil {
-		if attempt, ok := ctx.Value(homeAttemptContextKey{}).(*attemptCancel); ok {
-			s.preservedAttempt.Store(attempt)
-		}
-	}
-	s.End(reason)
 }
 
 // EndWithRelease closes all bound resources and returns the Home release ticket.

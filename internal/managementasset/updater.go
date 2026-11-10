@@ -17,11 +17,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpfetch"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -351,7 +350,7 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 		"Accept":     "application/vnd.github+json",
 		"User-Agent": httpUserAgent,
 	}
-	if token := githubauth.TokenForURL(releaseURL); token != "" {
+	if token := util.ResolveGitHubToken(); token != "" {
 		headers["Authorization"] = "Bearer " + token
 	}
 

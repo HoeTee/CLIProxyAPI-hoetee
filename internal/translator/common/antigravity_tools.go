@@ -19,21 +19,13 @@ var antigravityCollidingToolNames = map[string]struct{}{
 }
 
 // AntigravityToolNameToUpstream maps a client-facing tool name to the name
-// sent to the antigravity Interactions API. Escape the entire prefix chain
-// ending in an intrinsic name so real external_ names remain distinguishable.
+// sent to the antigravity Interactions API. Names that do not collide are
+// returned unchanged.
 func AntigravityToolNameToUpstream(name string) string {
-	if antigravityIntrinsicBase(name) {
+	if _, collides := antigravityCollidingToolNames[name]; collides {
 		return ExternalToolPrefix + name
 	}
 	return name
-}
-
-func antigravityIntrinsicBase(name string) bool {
-	for strings.HasPrefix(name, ExternalToolPrefix) {
-		name = strings.TrimPrefix(name, ExternalToolPrefix)
-	}
-	_, collides := antigravityCollidingToolNames[name]
-	return collides
 }
 
 // AntigravityUpstreamToolNameToClient strips the external prefix from an
@@ -43,7 +35,7 @@ func antigravityIntrinsicBase(name string) bool {
 func AntigravityUpstreamToolNameToClient(name string) string {
 	if strings.HasPrefix(name, ExternalToolPrefix) {
 		base := strings.TrimPrefix(name, ExternalToolPrefix)
-		if antigravityIntrinsicBase(base) {
+		if _, collides := antigravityCollidingToolNames[base]; collides {
 			return base
 		}
 	}

@@ -5,16 +5,16 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/gemini"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const antigravityWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
@@ -45,37 +45,35 @@ func antigravitySupportsNativeResponsesWebSearch(model string, modelInfo *regist
 }
 
 func shouldBuildAntigravityResponsesWebSearchRequest(model string, payload []byte, modelInfo *registry.ModelInfo) bool {
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := gjson.ParseBytes(payload)
 	return HasOnlyResponsesWebSearchTools(root) &&
 		antigravitySupportsNativeResponsesWebSearch(model, modelInfo) &&
 		AllowsResponsesWebSearchToolChoice(root)
 }
 
-func buildAntigravityResponsesWebSearchRequest(model string, payload []byte, stream bool) ([]byte, error) {
-	includedDomains := ExtractResponsesWebSearchAllowedDomains(util.ParseGJSONBytesNoCopy(payload))
-	rawJSON, errConvert := ConvertOpenAIResponsesRequestToGemini(model, payload, stream)
-	rawJSON = stripAntigravityServerSideToolInvocations(rawJSON)
+func buildAntigravityResponsesWebSearchRequest(model string, payload []byte, stream bool) []byte {
+	includedDomains := ExtractResponsesWebSearchAllowedDomains(gjson.ParseBytes(payload))
+	rawJSON := ConvertOpenAIResponsesRequestToGemini(model, payload, stream)
 	rawJSON = rewriteOpenAIResponsesReasoningForAntigravityClaude(model, payload, rawJSON)
-	out, _ := ConvertGeminiRequestToAntigravity(model, rawJSON, stream)
-	outDoc := ojson.NewDoc(out)
-	_ = outDoc.Set("requestType", "web_search")
-	ensureAntigravityResponsesWebSearchToolDoc(outDoc, out, includedDomains)
-	ensureAntigravityResponsesWebSearchSystemInstructionDoc(outDoc, out)
-	return enableAntigravityResponsesThinkingSummary(payload, outDoc.Bytes()), errConvert
+	out := ConvertGeminiRequestToAntigravity(model, rawJSON, stream)
+	out, _ = sjson.SetBytes(out, "requestType", "web_search")
+	out = ensureAntigravityResponsesWebSearchTool(out, includedDomains)
+	out = ensureAntigravityResponsesWebSearchSystemInstruction(out)
+	return enableAntigravityResponsesThinkingSummary(payload, out)
 }
 
-func ensureAntigravityResponsesWebSearchToolDoc(doc *ojson.Doc, payload []byte, includedDomains []string) {
+func ensureAntigravityResponsesWebSearchTool(payload []byte, includedDomains []string) []byte {
 	googleSearchTool := []byte(`{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}`)
 	if len(includedDomains) > 0 {
 		if domainsJSON, errMarshal := json.Marshal(includedDomains); errMarshal == nil {
-			googleSearchTool, _ = ojson.SetRawBytes(googleSearchTool, "googleSearch.includedDomains", domainsJSON)
+			googleSearchTool, _ = sjson.SetRawBytes(googleSearchTool, "googleSearch.includedDomains", domainsJSON)
 		}
 	}
 
-	tools := ojson.GetBytesNoCopy(payload, "request.tools")
+	tools := gjson.GetBytes(payload, "request.tools")
 	if !tools.IsArray() {
-		_ = doc.SetRawBytes("request.tools", translatorcommon.JoinRawArray([][]byte{googleSearchTool}))
-		return
+		payload, _ = sjson.SetRawBytes(payload, "request.tools", translatorcommon.JoinRawArray([][]byte{googleSearchTool}))
+		return payload
 	}
 
 	replaced := false
@@ -93,19 +91,20 @@ func ensureAntigravityResponsesWebSearchToolDoc(doc *ojson.Doc, payload []byte, 
 	if !replaced {
 		filtered = append([][]byte{googleSearchTool}, filtered...)
 	}
-	_ = doc.SetRawBytes("request.tools", translatorcommon.JoinRawArray(filtered))
+	payload, _ = sjson.SetRawBytes(payload, "request.tools", translatorcommon.JoinRawArray(filtered))
+	return payload
 }
 
-func ensureAntigravityResponsesWebSearchSystemInstructionDoc(doc *ojson.Doc, payload []byte) {
+func ensureAntigravityResponsesWebSearchSystemInstruction(payload []byte) []byte {
 	searchPart := []byte(`{"text":""}`)
-	searchPart, _ = ojson.SetBytes(searchPart, "text", antigravityWebSearchSystemInstruction)
+	searchPart, _ = sjson.SetBytes(searchPart, "text", antigravityWebSearchSystemInstruction)
 
-	sys := ojson.GetBytesNoCopy(payload, "request.systemInstruction")
+	sys := gjson.GetBytes(payload, "request.systemInstruction")
 	if !sys.Exists() {
 		instr := []byte(`{"role":"user","parts":[]}`)
-		instr, _ = ojson.SetRawBytes(instr, "parts", translatorcommon.JoinRawArray([][]byte{searchPart}))
-		_ = doc.SetRawBytes("request.systemInstruction", instr)
-		return
+		instr, _ = sjson.SetRawBytes(instr, "parts", translatorcommon.JoinRawArray([][]byte{searchPart}))
+		payload, _ = sjson.SetRawBytes(payload, "request.systemInstruction", instr)
+		return payload
 	}
 
 	var parts [][]byte
@@ -121,32 +120,33 @@ func ensureAntigravityResponsesWebSearchSystemInstructionDoc(doc *ojson.Doc, pay
 	if !alreadyPresent {
 		parts = append(parts, searchPart)
 	}
-	_ = doc.SetRawBytes("request.systemInstruction.parts", translatorcommon.JoinRawArray(parts))
+	payload, _ = sjson.SetRawBytes(payload, "request.systemInstruction.parts", translatorcommon.JoinRawArray(parts))
+	return payload
 }
 
 // ConvertOpenAIResponsesRequestToAntigravity translates an OpenAI Responses request
 // to the Antigravity schema using locally registered Antigravity capabilities.
-func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func ConvertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
 	req := ConvertOpenAIResponsesRequestEnvelopeToAntigravity(context.Background(), sdktranslator.RequestEnvelope{
 		Model:  modelName,
 		Body:   inputRawJSON,
 		Stream: stream,
 	})
-	return req.Body, nil
+	return req.Body
 }
 
 // ConvertOpenAIResponsesRequestEnvelopeToAntigravity translates an OpenAI Responses
 // request and consumes request-scoped model capabilities from the envelope.
 func ConvertOpenAIResponsesRequestEnvelopeToAntigravity(_ context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
 	if shouldBuildAntigravityResponsesWebSearchRequest(req.Model, req.Body, req.ModelInfo) {
-		req.Body, req.Err = buildAntigravityResponsesWebSearchRequest(req.Model, req.Body, req.Stream)
+		req.Body = buildAntigravityResponsesWebSearchRequest(req.Model, req.Body, req.Stream)
 		return req
 	}
 	inputRawJSON := req.Body
-	req.Body, req.Err = ConvertOpenAIResponsesRequestToGemini(req.Model, req.Body, req.Stream)
+	req.Body = ConvertOpenAIResponsesRequestToGemini(req.Model, req.Body, req.Stream)
 	req.Body = stripAntigravityResponsesGoogleSearch(req.Body)
 	req.Body = rewriteOpenAIResponsesReasoningForAntigravityClaude(req.Model, inputRawJSON, req.Body)
-	req.Body, _ = ConvertGeminiRequestToAntigravity(req.Model, req.Body, req.Stream)
+	req.Body = ConvertGeminiRequestToAntigravity(req.Model, req.Body, req.Stream)
 	req.Body = stripAntigravityResponsesGoogleSearch(req.Body)
 	req.Body = enableAntigravityResponsesThinkingSummary(inputRawJSON, req.Body)
 	return req
@@ -157,9 +157,8 @@ func ConvertOpenAIResponsesRequestEnvelopeToAntigravity(_ context.Context, req s
 // Antigravity only supports native search in dedicated web_search request envelopes
 // and rejects requests with mixed googleSearch and function declarations.
 func stripAntigravityResponsesGoogleSearch(payload []byte) []byte {
-	var doc *ojson.Doc
 	for _, path := range []string{"tools", "request.tools"} {
-		tools := ojson.GetBytesNoCopy(payload, path)
+		tools := gjson.GetBytes(payload, path)
 		if !tools.IsArray() {
 			continue
 		}
@@ -173,42 +172,12 @@ func stripAntigravityResponsesGoogleSearch(payload []byte) []byte {
 			filtered = append(filtered, []byte(tool.Raw))
 		}
 		if hasGoogleSearch {
-			if doc == nil {
-				doc = ojson.NewDoc(payload)
-			}
 			if len(filtered) == 0 {
-				_ = doc.Delete(path)
+				payload, _ = sjson.DeleteBytes(payload, path)
 			} else {
-				_ = doc.SetRawBytes(path, translatorcommon.JoinRawArray(filtered))
+				payload, _ = sjson.SetRawBytes(payload, path, translatorcommon.JoinRawArray(filtered))
 			}
 		}
-	}
-	if doc != nil {
-		payload = doc.Bytes()
-	}
-	return stripAntigravityServerSideToolInvocations(payload)
-}
-
-// stripAntigravityServerSideToolInvocations removes includeServerSideToolInvocations
-// injected by the shared Gemini Responses translator because Antigravity does not
-// support the includeServerSideToolInvocations parameter.
-func stripAntigravityServerSideToolInvocations(payload []byte) []byte {
-	var doc *ojson.Doc
-	for _, toolConfigPath := range []string{"toolConfig", "request.toolConfig"} {
-		flagPath := toolConfigPath + ".includeServerSideToolInvocations"
-		if !ojson.GetBytesNoCopy(payload, flagPath).Exists() {
-			continue
-		}
-		if doc == nil {
-			doc = ojson.NewDoc(payload)
-		}
-		_ = doc.Delete(flagPath)
-		if tc := doc.Get(toolConfigPath); tc.IsObject() && len(tc.Map()) == 0 {
-			_ = doc.Delete(toolConfigPath)
-		}
-	}
-	if doc != nil {
-		return doc.Bytes()
 	}
 	return payload
 }
@@ -217,24 +186,23 @@ func stripAntigravityServerSideToolInvocations(payload []byte) []byte {
 // Antigravity needs includeThoughts to emit thought parts, so effort alone would
 // otherwise spend thinking tokens without returning a visible summary.
 func enableAntigravityResponsesThinkingSummary(inputRawJSON, translated []byte) []byte {
-	effort := ojson.GetBytesNoCopy(inputRawJSON, "reasoning.effort")
-	if effort.Type != ojson.String {
+	effort := gjson.GetBytes(inputRawJSON, "reasoning.effort")
+	if effort.Type != gjson.String {
 		return translated
 	}
 	effortVal := strings.ToLower(strings.TrimSpace(effort.String()))
 	if effortVal == "" || effortVal == "none" {
 		return translated
 	}
-	summaryConfig := thinking.ExtractSummaryConfig(inputRawJSON, "openai-response")
-	if summaryConfig.Mode == thinking.SummaryUnspecified {
-		// When effort is set but summary visibility is omitted, enable summaries
-		// by default so Antigravity emits visible thought parts (#5508).
-		summaryConfig = thinking.SummaryConfig{
-			Mode:   thinking.SummaryEnabled,
-			Detail: "auto",
+	for _, path := range []string{"reasoning.summary", "reasoning.generate_summary"} {
+		if value := gjson.GetBytes(inputRawJSON, path); value.Raw != "" {
+			return translated
 		}
 	}
-	return thinking.ApplySummaryConfig(translated, "antigravity", summaryConfig)
+	return thinking.ApplySummaryConfig(translated, "antigravity", thinking.SummaryConfig{
+		Mode:   thinking.SummaryEnabled,
+		Detail: "auto",
+	})
 }
 
 type antigravityClaudeReasoningSignature struct {
@@ -336,13 +304,13 @@ func rewriteOpenAIResponsesReasoningForAntigravityClaude(modelName string, input
 }
 
 func antigravityClaudeReasoningSignatures(inputRawJSON []byte) []antigravityClaudeReasoningSignature {
-	input := ojson.GetBytesNoCopy(inputRawJSON, "input")
+	input := gjson.GetBytes(inputRawJSON, "input")
 	if !input.IsArray() {
 		return nil
 	}
 
 	signatures := make([]antigravityClaudeReasoningSignature, 0)
-	input.ForEach(func(_, item ojson.Result) bool {
+	input.ForEach(func(_, item gjson.Result) bool {
 		itemType := item.Get("type").String()
 		if itemType == "" && item.Get("role").Exists() {
 			itemType = "message"

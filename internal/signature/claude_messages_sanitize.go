@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type ClaudeMessagesSignatureSanitizeOptions struct {
@@ -16,95 +17,6 @@ type ClaudeMessagesSignatureSanitizeOptions struct {
 	// PreserveEmptyThinkingBlocks preserves compatibility-mode thinking blocks
 	// together with their original signatures, including opaque signatures.
 	PreserveEmptyThinkingBlocks bool
-}
-
-// CodexCommentarySignatureMarker is the CLIProxyAPI-internal marker carried in
-// the signature field of the Claude thinking block that relays a Codex
-// commentary message. It is not a provider signature and must never be
-// forwarded to any upstream: consumers either restore the block as assistant
-// commentary text (Claude-to-Codex request translation) or rewrite it as a
-// plain text block (this sanitizer).
-const CodexCommentarySignatureMarker = "cpa:commentary:v1"
-
-// IsCodexCommentarySignatureMarker reports whether rawSignature is exactly the
-// internal commentary marker, ignoring surrounding whitespace. The marker is a
-// plain, forgeable literal rather than a credential; it only distinguishes
-// CPA-relayed commentary from real reasoning history.
-func IsCodexCommentarySignatureMarker(rawSignature string) bool {
-	return strings.TrimSpace(rawSignature) == CodexCommentarySignatureMarker
-}
-
-// RestoreCodexCommentaryMarkers rewrites every assistant thinking block that
-// carries the internal commentary marker as a plain assistant text block and
-// reports how many blocks were restored. It is deliberately independent of
-// provider signature compatibility policy: the marker must never reach any
-// upstream, including Claude-compatible endpoints whose model name maps to a
-// non-Claude family and therefore skips full signature sanitization. Blocks
-// with empty thinking text are dropped because they carry no history. When no
-// marker is present the payload is returned unchanged.
-func RestoreCodexCommentaryMarkers(payload []byte) ([]byte, int) {
-	messages := ojson.GetBytesNoCopy(payload, "messages")
-	if !messages.IsArray() {
-		return payload, 0
-	}
-	doc := ojson.NewDoc(payload)
-	restored := RestoreCodexCommentaryMarkersDoc(doc)
-	if restored == 0 {
-		return payload, 0
-	}
-	return doc.Bytes(), restored
-}
-
-// RestoreCodexCommentaryMarkersDoc rewrites every assistant thinking block that
-// carries the internal commentary marker on doc in place.
-func RestoreCodexCommentaryMarkersDoc(doc *ojson.Doc) int {
-	if doc == nil {
-		return 0
-	}
-	messages := doc.Get("messages")
-	if !messages.IsArray() {
-		return 0
-	}
-	messageResults := messages.Array()
-	restored := 0
-	var droppedMessages []int
-	for i, message := range messageResults {
-		content := message.Get("content")
-		if !content.IsArray() {
-			continue
-		}
-		contentResults := content.Array()
-		var droppedParts []int
-		for j, part := range contentResults {
-			if part.Get("type").String() != "thinking" || !IsCodexCommentarySignatureMarker(part.Get("signature").String()) {
-				continue
-			}
-			restored++
-			partPath := fmt.Sprintf("messages.%d.content.%d", i, j)
-			if text := part.Get("thinking").String(); text != "" {
-				_ = doc.Set(partPath+".type", "text")
-				_ = doc.Delete(partPath + ".thinking")
-				_ = doc.Delete(partPath + ".signature")
-				_ = doc.Set(partPath+".text", text)
-			} else {
-				droppedParts = append(droppedParts, j)
-			}
-		}
-		if len(droppedParts) == 0 {
-			continue
-		}
-		if len(droppedParts) == len(contentResults) {
-			droppedMessages = append(droppedMessages, i)
-			continue
-		}
-		for k := len(droppedParts) - 1; k >= 0; k-- {
-			_ = doc.Delete(fmt.Sprintf("messages.%d.content.%d", i, droppedParts[k]))
-		}
-	}
-	for k := len(droppedMessages) - 1; k >= 0; k-- {
-		_ = doc.Delete(fmt.Sprintf("messages.%d", droppedMessages[k]))
-	}
-	return restored
 }
 
 type SignatureSanitizeReport struct {
@@ -156,40 +68,42 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 	}
 	report := SignatureSanitizeReport{TargetProvider: targetProvider}
 
-	messages := ojson.GetBytesNoCopy(payload, "messages")
+	messages := gjson.GetBytes(payload, "messages")
 	if !messages.IsArray() {
 		return payload, report
 	}
 
 	messageResults := messages.Array()
-	doc := ojson.NewDoc(payload)
+	keptMessages := make([]string, 0, len(messageResults))
 	modified := false
-	var droppedMessages []int
 
 	for i, message := range messageResults {
 		content := message.Get("content")
 		if !content.IsArray() {
+			keptMessages = append(keptMessages, message.Raw)
 			continue
 		}
 
 		contentResults := content.Array()
-		var droppedParts []int
+		keptParts := make([]string, 0, len(contentResults))
+		messageModified := false
 
 		for j, part := range contentResults {
-			partPath := fmt.Sprintf("messages.%d.content.%d", i, j)
 			partType := part.Get("type").String()
 			if partType == "tool_use" {
 				if opts.DropToolSignatures {
-					if stripClaudeToolUseSignatureFieldsDoc(doc, partPath) {
-						modified = true
+					updatedPart, changed := stripClaudeToolUseSignatureFields(part)
+					if changed {
+						messageModified = true
 						report.DroppedSignatures++
 					}
+					keptParts = append(keptParts, updatedPart)
 					continue
 				}
-				changed, decisions := sanitizeClaudeToolUseSignatureDoc(doc, part, partPath, targetProvider, opts.TargetModel, i, j)
+				updatedPart, changed, decisions := sanitizeClaudeToolUseSignature(part, targetProvider, opts.TargetModel, i, j)
 				report.Decisions = append(report.Decisions, decisions...)
 				if changed {
-					modified = true
+					messageModified = true
 				}
 				for _, decision := range decisions {
 					switch decision.Action {
@@ -201,37 +115,23 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 						report.DroppedSignatures++
 					}
 				}
+				keptParts = append(keptParts, updatedPart)
 				continue
 			}
 
 			if partType != "thinking" {
+				keptParts = append(keptParts, part.Raw)
 				continue
 			}
 
 			rawSignature := part.Get("signature").String()
-			if IsCodexCommentarySignatureMarker(rawSignature) {
-				// The internal commentary marker is not a provider signature:
-				// restore its text as a plain assistant text block so neither
-				// the marker nor a fake signature reaches the upstream.
-				if text := part.Get("thinking").String(); text != "" {
-					_ = doc.Set(partPath+".type", "text")
-					_ = doc.Delete(partPath + ".thinking")
-					_ = doc.Delete(partPath + ".signature")
-					_ = doc.Set(partPath+".text", text)
-					report.DroppedSignatures++
-					modified = true
-					continue
-				}
-				report.DroppedBlocks++
-				droppedParts = append(droppedParts, j)
-				modified = true
-				continue
-			}
 			if opts.PreserveEmptyThinkingBlocks {
 				report.Preserved++
+				keptParts = append(keptParts, part.Raw)
 				continue
 			}
 			if targetProvider == SignatureProviderClaude && isEmptyClaudeThinkingPlaceholder(part) && !opts.DropEmptyThinkingPlaceholders {
+				keptParts = append(keptParts, part.Raw)
 				continue
 			}
 
@@ -243,75 +143,79 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			case SignatureActionPreserve:
 				report.Preserved++
 				if decision.NormalizedSignature != "" && decision.NormalizedSignature != rawSignature {
-					_ = doc.Set(partPath+".signature", decision.NormalizedSignature)
-					modified = true
+					updated, _ := sjson.Set(part.Raw, "signature", decision.NormalizedSignature)
+					keptParts = append(keptParts, updated)
+					messageModified = true
+					continue
 				}
+				keptParts = append(keptParts, part.Raw)
 			case SignatureActionReplaceWithGeminiBypass:
 				report.ReplacedSignatures++
-				_ = doc.Set(partPath+".signature", decision.ReplacementSignature)
-				modified = true
+				updated, _ := sjson.Set(part.Raw, "signature", decision.ReplacementSignature)
+				keptParts = append(keptParts, updated)
+				messageModified = true
 			case SignatureActionDropSignature:
 				report.DroppedSignatures++
-				_ = doc.Delete(partPath + ".signature")
-				modified = true
+				updated, _ := sjson.Delete(part.Raw, "signature")
+				keptParts = append(keptParts, updated)
+				messageModified = true
 			default:
 				report.DroppedBlocks++
-				droppedParts = append(droppedParts, j)
-				modified = true
+				messageModified = true
 			}
 		}
 
-		if len(droppedParts) > 0 {
-			if len(droppedParts) == len(contentResults) && opts.DropEmptyMessages {
-				droppedMessages = append(droppedMessages, i)
+		if messageModified {
+			modified = true
+			if len(keptParts) == 0 && opts.DropEmptyMessages {
 				continue
 			}
-			for k := len(droppedParts) - 1; k >= 0; k-- {
-				_ = doc.Delete(fmt.Sprintf("messages.%d.content.%d", i, droppedParts[k]))
-			}
+			updated, _ := sjson.SetRaw(message.Raw, "content", "["+strings.Join(keptParts, ",")+"]")
+			keptMessages = append(keptMessages, updated)
+			continue
 		}
-	}
 
-	for k := len(droppedMessages) - 1; k >= 0; k-- {
-		_ = doc.Delete(fmt.Sprintf("messages.%d", droppedMessages[k]))
+		keptMessages = append(keptMessages, message.Raw)
 	}
 
 	if !modified {
 		return payload, report
 	}
-	return doc.Bytes(), report
+	output, _ := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(keptMessages, ",")+"]"))
+	return output, report
 }
 
-func stripClaudeToolUseSignatureFieldsDoc(doc *ojson.Doc, partPath string) bool {
+func stripClaudeToolUseSignatureFields(part gjson.Result) (string, bool) {
+	updated := part.Raw
 	changed := false
-	for _, relPath := range claudeToolUseProvenancePaths() {
-		sigPath := partPath + "." + relPath
-		if !doc.Get(sigPath).Exists() {
+	for _, sigPath := range claudeToolUseProvenancePaths() {
+		if !gjson.Get(updated, sigPath).Exists() {
 			continue
 		}
-		if doc.Delete(sigPath) == nil {
-			changed = true
-		}
-	}
-	if deleteEmptyJSONObjectPathDoc(doc, partPath+".extra_content.google") {
+		updated, _ = sjson.Delete(updated, sigPath)
 		changed = true
 	}
-	if deleteEmptyJSONObjectPathDoc(doc, partPath+".extra_content") {
+	if cleaned, ok := deleteEmptyJSONObjectPath(updated, "extra_content.google"); ok {
+		updated = cleaned
 		changed = true
 	}
-	return changed
+	if cleaned, ok := deleteEmptyJSONObjectPath(updated, "extra_content"); ok {
+		updated = cleaned
+		changed = true
+	}
+	return updated, changed
 }
 
-func sanitizeClaudeToolUseSignatureDoc(doc *ojson.Doc, part ojson.Result, partPath string, targetProvider SignatureProvider, targetModel string, messageIdx, partIdx int) (bool, []SignatureCompatibilityDecision) {
+func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider SignatureProvider, targetModel string, messageIdx, partIdx int) (string, bool, []SignatureCompatibilityDecision) {
+	updated := part.Raw
 	changed := false
 	var decisions []SignatureCompatibilityDecision
 
-	for _, relPath := range claudeToolUseSignaturePaths() {
-		sigResult := part.Get(relPath)
+	for _, sigPath := range claudeToolUseSignaturePaths() {
+		sigResult := part.Get(sigPath)
 		if !sigResult.Exists() {
 			continue
 		}
-		sigPath := partPath + "." + relPath
 
 		blockKind := SignatureBlockKindGeminiFunctionCall
 		if targetProvider == SignatureProviderClaude {
@@ -320,43 +224,34 @@ func sanitizeClaudeToolUseSignatureDoc(doc *ojson.Doc, part ojson.Result, partPa
 			blockKind = SignatureBlockKindGPTReasoning
 		}
 		decision := DecideSignatureCompatibilityForModel(targetProvider, targetModel, sigResult.String(), blockKind)
-		decision.Reason = fmt.Sprintf("messages[%d].content[%d].%s: %s", messageIdx, partIdx, relPath, decision.Reason)
+		decision.Reason = fmt.Sprintf("messages[%d].content[%d].%s: %s", messageIdx, partIdx, sigPath, decision.Reason)
 		decisions = append(decisions, decision)
 
 		switch decision.Action {
 		case SignatureActionPreserve:
 			if decision.NormalizedSignature != "" && decision.NormalizedSignature != sigResult.String() {
-				if doc.Set(sigPath, decision.NormalizedSignature) == nil {
-					changed = true
-				}
+				updated, _ = sjson.Set(updated, sigPath, decision.NormalizedSignature)
+				changed = true
 			}
 		case SignatureActionReplaceWithGeminiBypass:
-			if doc.Set(sigPath, decision.ReplacementSignature) == nil {
-				changed = true
-			}
+			updated, _ = sjson.Set(updated, sigPath, decision.ReplacementSignature)
+			changed = true
 		default:
-			if doc.Delete(sigPath) == nil {
-				changed = true
-			}
+			updated, _ = sjson.Delete(updated, sigPath)
+			changed = true
 		}
 	}
 
-	if deleteEmptyJSONObjectPathDoc(doc, partPath+".extra_content.google") {
+	if cleaned, ok := deleteEmptyJSONObjectPath(updated, "extra_content.google"); ok {
+		updated = cleaned
 		changed = true
 	}
-	if deleteEmptyJSONObjectPathDoc(doc, partPath+".extra_content") {
+	if cleaned, ok := deleteEmptyJSONObjectPath(updated, "extra_content"); ok {
+		updated = cleaned
 		changed = true
 	}
 
-	return changed, decisions
-}
-
-func deleteEmptyJSONObjectPathDoc(doc *ojson.Doc, path string) bool {
-	result := doc.Get(path)
-	if !result.Exists() || !result.IsObject() || len(result.Map()) != 0 {
-		return false
-	}
-	return doc.Delete(path) == nil
+	return updated, changed, decisions
 }
 
 func claudeToolUseSignaturePaths() []string {
@@ -370,4 +265,16 @@ func claudeToolUseSignaturePaths() []string {
 
 func claudeToolUseProvenancePaths() []string {
 	return append(claudeToolUseSignaturePaths(), "model")
+}
+
+func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
+	result := gjson.Get(raw, path)
+	if !result.Exists() || !result.IsObject() || len(result.Map()) != 0 {
+		return raw, false
+	}
+	updated, err := sjson.Delete(raw, path)
+	if err != nil {
+		return raw, false
+	}
+	return updated, true
 }

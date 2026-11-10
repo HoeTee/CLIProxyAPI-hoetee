@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,7 +21,6 @@ func (s *Server) registerManagementRoutes() {
 
 	log.Info("management routes registered after secret key configuration")
 
-	s.registerManagementV8Routes()
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
 
@@ -29,8 +28,17 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/config", s.mgmt.GetConfig)
+		mgmt.GET("/provider-overview", s.mgmt.GetProviderOverview)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
+		mgmt.GET("/codex-client-quotas", s.mgmt.GetCodexClientQuotas)
+		mgmt.PATCH("/codex-client-quotas", s.mgmt.PatchCodexClientQuota)
+		mgmt.GET("/deepseek-balance", s.mgmt.GetDeepSeekBalance)
+		mgmt.GET("/deepseek-client-quotas", s.mgmt.GetDeepSeekClientQuotas)
+		mgmt.PATCH("/deepseek-client-quotas", s.mgmt.PatchDeepSeekClientQuota)
+		mgmt.GET("/glm-client-quotas", s.mgmt.GetGLMClientQuotas)
+		mgmt.PATCH("/glm-client-quotas", s.mgmt.PatchGLMClientQuota)
+		mgmt.GET("/glm-plan-quota", s.mgmt.GetGLMPlanQuota)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
 		mgmt.GET("/plugins", s.mgmt.ListPlugins)
 		mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
@@ -91,6 +99,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		mgmt.GET("/usage-history/summary", s.getUsageHistorySummary)
+		mgmt.GET("/usage-history/requests", s.getUsageHistoryRequests)
+		mgmt.GET("/clients", s.mgmt.GetClients)
+		mgmt.POST("/clients", s.mgmt.PostClient)
+		mgmt.PATCH("/clients/:id", s.mgmt.PatchClient)
+		mgmt.POST("/clients/:id/rotate", s.mgmt.RotateClientKey)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -211,12 +225,11 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) managementAvailable(c *gin.Context) bool {
-	cfg := s.getConfig()
-	if s == nil || cfg == nil {
+	if s == nil || s.cfg == nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return false
 	}
-	if cfg.Home.Enabled {
+	if s.cfg.Home.Enabled {
 		c.AbortWithStatus(http.StatusNotFound)
 		return false
 	}
@@ -297,8 +310,7 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 		}
 		return
 	}
-	cfg := s.getConfig()
-	if cfg == nil || cfg.Home.Enabled || s.pluginHost == nil {
+	if s.cfg == nil || s.cfg.Home.Enabled || s.pluginHost == nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -310,7 +322,7 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
-	cfg := s.getConfig()
+	cfg := s.cfg
 	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -336,5 +348,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	if !serveClientQuotaPanel(c, filePath) {
+		c.File(filePath)
+	}
 }

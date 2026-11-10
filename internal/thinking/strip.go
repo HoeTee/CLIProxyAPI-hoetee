@@ -2,10 +2,8 @@
 package thinking
 
 import (
-	"strings"
-
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // StripThinkingConfig removes thinking configuration fields from request body.
@@ -25,39 +23,14 @@ import (
 //   - provider is unknown
 //   - no thinking configuration found
 func StripThinkingConfig(body []byte, provider string) []byte {
-	if len(body) == 0 || !ojson.ValidBytes(body) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
-	doc := ojson.NewDoc(body)
-	if !stripThinkingFieldsDoc(doc, provider) {
-		return body
-	}
-	return doc.Bytes()
-}
-
-// StripThinkingFieldsDoc removes thinking configuration fields from doc in place.
-func StripThinkingFieldsDoc(doc *ojson.Doc, format string, keepTopLevelEffort ...bool) {
-	_ = stripThinkingFieldsDoc(doc, format, keepTopLevelEffort...)
-}
-
-func stripThinkingFieldsDoc(doc *ojson.Doc, format string, keepTopLevelEffort ...bool) bool {
-	if doc == nil {
-		return false
-	}
-	provider := strings.ToLower(strings.TrimSpace(format))
-	if provider == "openai-response" {
-		provider = "codex"
-	}
-	keepEffort := len(keepTopLevelEffort) > 0 && keepTopLevelEffort[0]
 
 	var paths []string
 	switch provider {
 	case "claude":
-		if keepEffort {
-			paths = []string{"thinking"}
-		} else {
-			paths = []string{"thinking", "output_config.effort"}
-		}
+		paths = []string{"thinking", "output_config.effort"}
 	case "gemini":
 		paths = []string{"generationConfig.thinkingConfig"}
 	case "antigravity":
@@ -74,41 +47,28 @@ func stripThinkingFieldsDoc(doc *ojson.Doc, format string, keepTopLevelEffort ..
 			"generation_config.thinkingConfig",
 		}
 	case "openai":
-		if keepEffort {
-			paths = []string{"reasoning"}
-		} else {
-			paths = []string{"reasoning_effort", "reasoning"}
-		}
+		paths = []string{"reasoning_effort", "reasoning"}
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
-		if keepEffort {
-			paths = []string{"thinking"}
-		} else {
-			paths = []string{"reasoning_effort", "thinking"}
+		paths = []string{
+			"reasoning_effort",
+			"thinking",
 		}
 	case "codex", "xai":
-		if !keepEffort {
-			paths = []string{"reasoning"}
-		}
+		paths = []string{"reasoning"}
 	default:
-		return false
+		return body
 	}
 
-	modified := false
+	result := body
 	for _, path := range paths {
-		if doc.Get(path).Exists() {
-			if doc.Delete(path) == nil {
-				modified = true
-			}
-		}
+		result, _ = sjson.DeleteBytes(result, path)
 	}
 
 	// Avoid leaving an empty output_config object for Claude when effort was the only field.
-	if provider == "claude" && !keepEffort {
-		if oc := doc.Get("output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			if util.DeleteJSONDocIfExists(doc, "output_config") == nil {
-				modified = true
-			}
+	if provider == "claude" {
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
 		}
 	}
-	return modified
+	return result
 }

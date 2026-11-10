@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func GeminiTokenCountJSON(count int64) []byte {
@@ -60,7 +61,7 @@ func SetRawArrayItems(data []byte, path string, items [][]byte) []byte {
 		return data
 	}
 	if len(items) == 1 {
-		array := ojson.GetBytesNoCopy(data, path)
+		array := gjson.GetBytes(data, path)
 		if array.Raw == "[]" && array.Index >= 0 && array.Index+len(array.Raw) <= len(data) {
 			out := make([]byte, 0, len(data)+len(items[0]))
 			out = append(out, data[:array.Index]...)
@@ -70,28 +71,18 @@ func SetRawArrayItems(data []byte, path string, items [][]byte) []byte {
 			return append(out, data[array.Index+len(array.Raw):]...)
 		}
 	}
-	data, _ = ojson.SetRawBytes(data, path, JoinRawArray(items))
+	data, _ = sjson.SetRawBytes(data, path, JoinRawArray(items))
 	return data
 }
 
-// SetRawArrayItemsDoc replaces a JSON array at path in doc with raw items.
-func SetRawArrayItemsDoc(doc *ojson.Doc, path string, items [][]byte) {
-	if doc == nil || len(items) == 0 {
-		return
-	}
-	_ = doc.SetRawBytes(path, JoinRawArray(items))
-}
-
-// SSEEventData builds one complete SSE frame. Each frame carries its own
-// blank-line terminator so concatenated frames stay separable downstream.
 func SSEEventData(event string, payload []byte) []byte {
-	out := make([]byte, 0, len(event)+len(payload)+16)
+	out := make([]byte, 0, len(event)+len(payload)+14)
 	out = append(out, "event: "...)
 	out = append(out, event...)
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	return append(out, '\n', '\n')
+	return out
 }
 
 func AppendSSEEventString(out []byte, event, payload string, trailingNewlines int) []byte {
@@ -119,7 +110,7 @@ func AppendSSEEventBytes(out []byte, event string, payload []byte, trailingNewli
 }
 
 // SetStringWithoutHTMLEscape sets a string field in a JSON payload without escaping
-// HTML characters (<, >, &). Standard ojson.Set/SetBytes delegates string values
+// HTML characters (<, >, &). Standard sjson.Set/SetBytes delegates string values
 // containing quotes or special characters to encoding/json.Marshal, which unconditionally
 // escapes <, >, & to \u003c, \u003e, \u0026.
 func SetStringWithoutHTMLEscape(data []byte, path, value string) ([]byte, error) {
@@ -127,24 +118,8 @@ func SetStringWithoutHTMLEscape(data []byte, path, value string) ([]byte, error)
 	enc := json.NewEncoder(buf)
 	enc.SetEscapeHTML(false)
 	if errEncode := enc.Encode(value); errEncode != nil {
-		return ojson.SetBytes(data, path, value)
+		return sjson.SetBytes(data, path, value)
 	}
 	raw := bytes.TrimRight(buf.Bytes(), "\n")
-	return ojson.SetRawBytes(data, path, raw)
-}
-
-// SetStringWithoutHTMLEscapeDoc sets a string field in an ojson.Doc without escaping
-// HTML characters (<, >, &).
-func SetStringWithoutHTMLEscapeDoc(doc *ojson.Doc, path, value string) error {
-	if doc == nil {
-		return nil
-	}
-	buf := &bytes.Buffer{}
-	enc := json.NewEncoder(buf)
-	enc.SetEscapeHTML(false)
-	if errEncode := enc.Encode(value); errEncode != nil {
-		return doc.Set(path, value)
-	}
-	raw := bytes.TrimRight(buf.Bytes(), "\n")
-	return doc.SetRawBytes(path, raw)
+	return sjson.SetRawBytes(data, path, raw)
 }

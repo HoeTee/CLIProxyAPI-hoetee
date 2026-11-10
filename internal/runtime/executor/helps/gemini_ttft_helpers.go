@@ -3,7 +3,7 @@ package helps
 import (
 	"bytes"
 
-	"github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
 )
 
 // IsGeminiTokenEvent reports whether a Google Gemini / Antigravity streaming chunk carries
@@ -28,13 +28,13 @@ func IsGeminiTokenEvent(payload []byte) bool {
 	}
 
 	// Terminal error fallback
-	if ojson.GetBytesNoCopy(payload, "error.message").Exists() || ojson.GetBytesNoCopy(payload, "error").Exists() || ojson.GetBytesNoCopy(payload, "response.error").Exists() {
+	if gjson.GetBytes(payload, "error.message").Exists() || gjson.GetBytes(payload, "error").Exists() || gjson.GetBytes(payload, "response.error").Exists() {
 		return true
 	}
 
-	candidatesNode := ojson.GetBytesNoCopy(payload, "candidates")
+	candidatesNode := gjson.GetBytes(payload, "candidates")
 	if !candidatesNode.Exists() {
-		candidatesNode = ojson.GetBytesNoCopy(payload, "response.candidates")
+		candidatesNode = gjson.GetBytes(payload, "response.candidates")
 	}
 	candidates := candidatesNode.Array()
 	if len(candidates) == 0 {
@@ -51,7 +51,7 @@ func IsGeminiTokenEvent(payload []byte) bool {
 			if len(part.Get("thoughtText").String()) > 0 {
 				return true
 			}
-			if thought := part.Get("thought"); thought.Type == ojson.String && len(thought.String()) > 0 {
+			if thought := part.Get("thought"); thought.Type == gjson.String && len(thought.String()) > 0 {
 				return true
 			}
 			if len(part.Get("functionCall.name").String()) > 0 {

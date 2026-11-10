@@ -13,11 +13,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
-	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 )
 
 // GeminiAPIHandler contains the handlers for Gemini API endpoints.
@@ -49,7 +48,7 @@ func (h *GeminiAPIHandler) Models() []map[string]any {
 // GeminiModels handles the Gemini models listing endpoint.
 // It returns a JSON response containing available Gemini models and their specifications.
 func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
-	rawModels := h.Models()
+	rawModels := handlers.FilterClientModels(c, h.Models(), "name")
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
 	defaultMethods := []string{"generateContent"}
 	for _, model := range rawModels {
@@ -96,7 +95,7 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 	action := strings.TrimPrefix(request.Action, "/")
 
 	// Get dynamic models from the global registry and find the matching one
-	availableModels := h.Models()
+	availableModels := handlers.FilterClientModels(c, h.Models(), "name")
 	var targetModel map[string]any
 
 	for _, model := range availableModels {
@@ -152,16 +151,7 @@ func (h *GeminiAPIHandler) GeminiHandler(c *gin.Context) {
 	}
 
 	method := action[1]
-	rawJSON, errRead := c.GetRawData()
-	if errRead != nil && c.Request != nil && c.Request.Body != nil {
-		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", errRead),
-				Type:    "invalid_request_error",
-			},
-		})
-		return
-	}
+	rawJSON, _ := c.GetRawData()
 
 	switch method {
 	case "generateContent":
@@ -198,44 +188,14 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	var upstreamHeaders http.Header
-	committed := false
-	commitHeaders := func() {
-		if committed {
-			return
-		}
-		if alt == "" {
-			setSSEHeaders()
-		}
-		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-		committed = true
-	}
-	writeKeepAlive := func() bool {
-		commitHeaders()
-		_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
-		flusher.Flush()
-		return true
-	}
-	var keepAliveC <-chan time.Time
-	stopKeepAlive := func() {}
-	if alt == "" {
-		keepAliveC, stopKeepAlive = handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
-	}
-	defer stopKeepAlive()
-
-	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
-		c, cliCtx, func(err error) { cliCancel(err) }, h.HandlerType(), modelName, rawJSON, alt, keepAliveC, writeKeepAlive,
-	)
-	if !okBootstrap {
-		return
-	}
-	upstreamHeaders = resolvedHeaders
 
 	// Peek at the first chunk
 	for {
@@ -249,14 +209,6 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 				errChan = nil
 				continue
 			}
-			if committed {
-				stopKeepAlive()
-				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
-				pendingErrors <- errMsg
-				close(pendingErrors)
-				h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors)
-				return
-			}
 			// Upstream failed immediately. Return proper error status and JSON.
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
@@ -267,15 +219,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				stopKeepAlive()
 				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
-					if committed {
-						pendingErrors := make(chan *interfaces.ErrorMessage, 1)
-						pendingErrors <- errMsg
-						close(pendingErrors)
-						h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors)
-						return
-					}
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
@@ -285,15 +229,20 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 					return
 				}
 				// Closed without data
-				commitHeaders()
+				if alt == "" {
+					setSSEHeaders()
+				}
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 				flusher.Flush()
 				cliCancel(nil)
 				return
 			}
 
 			// Success! Set headers.
-			stopKeepAlive()
-			commitHeaders()
+			if alt == "" {
+				setSSEHeaders()
+			}
+			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			// Write first chunk
 			if alt == "" {
@@ -308,8 +257,6 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 			// Continue
 			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)
 			return
-		case <-keepAliveC:
-			writeKeepAlive()
 		}
 	}
 }
@@ -384,7 +331,6 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 			if errMsg == nil {
 				return
 			}
-			h.LoggingAPIResponseError(c, errMsg)
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
 				status = errMsg.StatusCode

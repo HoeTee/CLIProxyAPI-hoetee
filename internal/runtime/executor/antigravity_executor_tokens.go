@@ -8,14 +8,14 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 // CountTokens counts tokens for the given request using the Antigravity API.
@@ -35,18 +35,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, errValidate
 	}
 	req.Payload = originalPayloadSource
-
-	// Prepare payload once (doesn't depend on baseURL). A translation refusal is
-	// observed before the token refresh or any upstream call.
-	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
-	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Body: req.Payload, ModelInfo: modelInfo}
-	translatedReq := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq)
-	if translatedReq.Err != nil {
-		return cliproxyexecutor.Response{}, translatedReq.Err
-	}
-	payload := translatedReq.Body
-	originalTranslatedForPayload := append([]byte(nil), payload...)
-
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return cliproxyexecutor.Response{}, errToken
@@ -59,24 +47,29 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 
-	doc := ojson.NewDoc(payload)
-	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); errThinking != nil {
-		return cliproxyexecutor.Response{}, errThinking
+	// Prepare payload once (doesn't depend on baseURL)
+	modelInfo, _ := cliproxyauth.ResolvedModelInfo(req)
+	translationReq := sdktranslator.RequestEnvelope{Format: from, Model: baseModel, Body: req.Payload, ModelInfo: modelInfo}
+	payload := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, translationReq).Body
+
+	payload, err := helps.ApplyRequestThinking(payload, req, opts, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
 	}
-	e.obfuscateSensitiveWordsDoc(doc)
-	helps.PrepareAntigravityClaudeStructuredOutputDoc(baseModel, doc)
-	sanitizeAntigravityGeminiRequestSignaturesDoc(baseModel, doc)
-	if _, errReplay := prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
+	payload = e.obfuscateSensitiveWords(payload)
+	payload = sanitizeAntigravityGeminiRequestSignatures(baseModel, payload)
+	preparedPayload, _, errReplay := prepareAntigravityGeminiReasoningReplayPayload(ctx, baseModel, req, opts, payload)
+	if errReplay != nil {
 		return cliproxyexecutor.Response{}, errReplay
 	}
-	ensureAntigravityGeminiLeadingUserContentDoc(baseModel, doc)
+	payload = ensureAntigravityGeminiLeadingUserContent(baseModel, preparedPayload)
 
-	_ = doc.Delete("project")
-	_ = doc.Delete("model")
-	_ = doc.Delete("request.safetySettings")
-	_ = doc.Delete("request.toolConfig")
-	_ = doc.Delete("request.labels")
-	_ = doc.Delete("request.sessionId")
+	payload = helps.DeleteJSONField(payload, "project")
+	payload = helps.DeleteJSONField(payload, "model")
+	payload = helps.DeleteJSONField(payload, "request.safetySettings")
+	payload = helps.DeleteJSONField(payload, "request.toolConfig")
+	payload = helps.DeleteJSONField(payload, "request.labels")
+	payload = helps.DeleteJSONField(payload, "request.sessionId")
 
 	base := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -96,9 +89,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		requestURL.WriteString(url.QueryEscape(opts.Alt))
 	}
 
-	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "request", originalTranslatedForPayload, req, opts))
-	helps.FinalizePayloadDoc(ctx, doc)
-	payload = doc.Bytes()
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
 		return cliproxyexecutor.Response{}, errReq
@@ -129,7 +119,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	})
 
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "count_tokens").Do(httpReq)
+	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		return cliproxyexecutor.Response{}, errDo
@@ -147,7 +137,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
 	if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
-		count := ojson.GetBytesNoCopy(bodyBytes, "totalTokens").Int()
+		count := gjson.GetBytes(bodyBytes, "totalTokens").Int()
 		translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, bodyBytes)
 		return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
 	}

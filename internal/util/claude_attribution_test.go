@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
 )
 
 func TestIsClaudeCodeAttributionSystemText(t *testing.T) {
@@ -79,7 +79,7 @@ func TestStripClaudeCodeAttributionSystem(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := StripClaudeCodeAttributionSystem([]byte(tt.body))
-			system := ojson.GetBytes(got, "system")
+			system := gjson.GetBytes(got, "system")
 			if system.Exists() != tt.wantPresent {
 				t.Fatalf("system exists = %v, want %v: %s", system.Exists(), tt.wantPresent, got)
 			}

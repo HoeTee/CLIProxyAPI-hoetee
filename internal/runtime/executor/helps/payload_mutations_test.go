@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/tidwall/gjson"
 )
 
 type countingPayloadMarshaler struct {
@@ -33,8 +33,8 @@ func TestSetStringIfDifferentNormalizesWrongType(t *testing.T) {
 	input := []byte(`{"model":123}`)
 	original := bytes.Clone(input)
 	output := SetStringIfDifferent(input, "model", "123")
-	model := ojson.GetBytes(output, "model")
-	if model.Type != ojson.String || model.String() != "123" {
+	model := gjson.GetBytes(output, "model")
+	if model.Type != gjson.String || model.String() != "123" {
 		t.Fatalf("model = %s, want string 123", model.Raw)
 	}
 	if !bytes.Equal(input, original) {
@@ -53,7 +53,7 @@ func TestSetBoolIfDifferentReusesCanonicalValue(t *testing.T) {
 func TestSetBoolIfDifferentNormalizesWrongType(t *testing.T) {
 	input := []byte(`{"stream":"true"}`)
 	output := SetBoolIfDifferent(input, "stream", true)
-	if stream := ojson.GetBytes(output, "stream"); stream.Type != ojson.True {
+	if stream := gjson.GetBytes(output, "stream"); stream.Type != gjson.True {
 		t.Fatalf("stream = %s, want boolean true", stream.Raw)
 	}
 }
@@ -69,41 +69,9 @@ func TestSetRawIfDifferentReusesIdenticalRawValue(t *testing.T) {
 func TestSetRawIfDifferentUpdatesDifferentRawValue(t *testing.T) {
 	input := []byte(`{"metadata":"executor"}`)
 	output := SetRawIfDifferent(input, "metadata", []byte(`{"source":"executor"}`))
-	metadata := ojson.GetBytes(output, "metadata")
+	metadata := gjson.GetBytes(output, "metadata")
 	if !metadata.IsObject() || metadata.Get("source").String() != "executor" {
 		t.Fatalf("metadata = %s, want object", metadata.Raw)
-	}
-}
-
-func TestSetIfDifferentDocMutations(t *testing.T) {
-	doc := ojson.NewDoc([]byte(`{"model":"gpt-test","stream":true,"metadata":{"source":"executor"}}`))
-	if SetStringIfDifferentDoc(doc, "model", "gpt-test") {
-		t.Fatal("SetStringIfDifferentDoc reported change for identical string")
-	}
-	if !SetStringIfDifferentDoc(doc, "model", "gpt-4o") {
-		t.Fatal("SetStringIfDifferentDoc did not report change for updated string")
-	}
-	if SetBoolIfDifferentDoc(doc, "stream", true) {
-		t.Fatal("SetBoolIfDifferentDoc reported change for identical bool")
-	}
-	if !SetBoolIfDifferentDoc(doc, "stream", false) {
-		t.Fatal("SetBoolIfDifferentDoc did not report change for updated bool")
-	}
-	if SetRawIfDifferentDoc(doc, "metadata", []byte(`{"source":"executor"}`)) {
-		t.Fatal("SetRawIfDifferentDoc reported change for identical raw value")
-	}
-	if !SetRawIfDifferentDoc(doc, "metadata", []byte(`{"source":"updated"}`)) {
-		t.Fatal("SetRawIfDifferentDoc did not report change for updated raw value")
-	}
-	out := doc.Bytes()
-	if got := ojson.GetBytesNoCopy(out, "model").String(); got != "gpt-4o" {
-		t.Fatalf("model = %q, want gpt-4o", got)
-	}
-	if ojson.GetBytesNoCopy(out, "stream").Bool() {
-		t.Fatalf("stream = true, want false")
-	}
-	if got := ojson.GetBytesNoCopy(out, "metadata.source").String(); got != "updated" {
-		t.Fatalf("metadata.source = %q, want updated", got)
 	}
 }
 
@@ -230,7 +198,7 @@ func TestApplyPayloadConfigProjectionOverrideWritesEveryMatch(t *testing.T) {
 	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
 	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
 	for _, path := range []string{"items.0.value", "items.1.value"} {
-		if got := ojson.GetBytes(output, path).Raw; got != `[1,2]` {
+		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
 			t.Fatalf("%s = %s, want [1,2]", path, got)
 		}
 	}
@@ -246,7 +214,7 @@ func TestApplyPayloadConfigProjectionOverrideRawWritesEveryMatch(t *testing.T) {
 	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
 	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
 	for _, path := range []string{"items.0.value", "items.1.value"} {
-		if got := ojson.GetBytes(output, path).Raw; got != `[1,2]` {
+		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
 			t.Fatalf("%s = %s, want [1,2]", path, got)
 		}
 	}
@@ -261,8 +229,8 @@ func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 	}}
 	input := []byte(`{"value":"YWJj"}`)
 	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
-	value := ojson.GetBytes(output, "value")
-	if value.Type != ojson.String || value.String() != "abc" {
+	value := gjson.GetBytes(output, "value")
+	if value.Type != gjson.String || value.String() != "abc" {
 		t.Fatalf("value = %s, want string abc", value.Raw)
 	}
 }
@@ -270,7 +238,7 @@ func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 func TestSetPayloadValueIfDifferentUsesSJSONNumberEncoding(t *testing.T) {
 	input := []byte(`{"value":1.2}`)
 	output := setPayloadValueIfDifferent(input, "value", float32(1.2))
-	if got := ojson.GetBytes(output, "value").Raw; got != "1.2000000476837158" {
+	if got := gjson.GetBytes(output, "value").Raw; got != "1.2000000476837158" {
 		t.Fatalf("value = %s, want sjson float32 encoding", got)
 	}
 	canonical := []byte(`{"value":1.2000000476837158}`)
@@ -288,7 +256,7 @@ func TestSetPayloadValueIfDifferentCallsMarshalerOnce(t *testing.T) {
 		if calls != 1 {
 			t.Fatalf("MarshalJSON calls = %d, want 1", calls)
 		}
-		if got := ojson.GetBytes(output, "value").String(); got != "new" {
+		if got := gjson.GetBytes(output, "value").String(); got != "new" {
 			t.Fatalf("value = %q, want new", got)
 		}
 	}

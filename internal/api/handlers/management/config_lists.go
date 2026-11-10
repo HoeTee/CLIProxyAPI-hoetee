@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 func parseCredentialWeightPatch(raw json.RawMessage) (*int, error) {
@@ -65,18 +65,14 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 		}
 		arr = obj.Items
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	set(arr)
 	if after != nil {
 		after()
 	}
-	h.persistLocked(c)
+	h.persist(c)
 }
 
-// patchStringList resolves the list through targetOf under h.mu, so it edits the
-// current config instead of one a reload has replaced.
-func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, after func()) {
+func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()) {
 	var body struct {
 		Old   *string `json:"old"`
 		New   *string `json:"new"`
@@ -87,15 +83,12 @@ func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, aft
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	target := targetOf()
 	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
 		(*target)[*body.Index] = *body.Value
 		if after != nil {
 			after()
 		}
-		h.persistLocked(c)
+		h.persist(c)
 		return
 	}
 	if body.Old != nil && body.New != nil {
@@ -105,7 +98,7 @@ func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, aft
 				if after != nil {
 					after()
 				}
-				h.persistLocked(c)
+				h.persist(c)
 				return
 			}
 		}
@@ -113,18 +106,13 @@ func (h *Handler) patchStringList(c *gin.Context, targetOf func() *[]string, aft
 		if after != nil {
 			after()
 		}
-		h.persistLocked(c)
+		h.persist(c)
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing fields"})
 }
 
-// deleteFromStringList resolves the list through targetOf under h.mu, so it edits
-// the current config instead of one a reload has replaced.
-func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string, after func()) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	target := targetOf()
+func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after func()) {
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
@@ -133,7 +121,7 @@ func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string
 			if after != nil {
 				after()
 			}
-			h.persistLocked(c)
+			h.persist(c)
 			return
 		}
 	}
@@ -148,7 +136,7 @@ func (h *Handler) deleteFromStringList(c *gin.Context, targetOf func() *[]string
 		if after != nil {
 			after()
 		}
-		h.persistLocked(c)
+		h.persist(c)
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing index or value"})
@@ -162,10 +150,10 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 	}, nil)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {})
+	h.patchStringList(c, &h.cfg.APIKeys, func() {})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, func() *[]string { return &h.cfg.APIKeys }, func() {})
+	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
 }
 
 // gemini-api-key: []GeminiKey
@@ -203,7 +191,6 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
-		Priority            *int                             `json:"priority"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -262,9 +249,6 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	entry := h.cfg.GeminiKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.Priority != nil {
-		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -409,7 +393,6 @@ func (h *Handler) PutInteractionsKeys(c *gin.Context) {
 func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
-		Priority            *int                             `json:"priority"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -469,9 +452,6 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	entry := h.cfg.InteractionsKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.Priority != nil {
-		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -906,7 +886,6 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
 		Name                  *string                             `json:"name"`
-		Priority              *int                                `json:"priority"`
 		Prefix                *string                             `json:"prefix"`
 		Disabled              *bool                               `json:"disabled"`
 		DisableCooling        json.RawMessage                     `json:"disable-cooling"`
@@ -951,9 +930,6 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	entry := h.cfg.OpenAICompatibility[targetIndex]
 	if body.Value.Name != nil {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
-	}
-	if body.Value.Priority != nil {
-		entry.Priority = *body.Value.Priority
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -1072,7 +1048,6 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
-		Priority       *int                        `json:"priority"`
 		Weight         json.RawMessage             `json:"weight"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
@@ -1125,9 +1100,6 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 			return
 		}
 		entry.APIKey = trimmed
-	}
-	if body.Value.Priority != nil {
-		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1242,10 +1214,8 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
@@ -1263,8 +1233,6 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		return
 	}
 	normalized := config.NormalizeExcludedModels(body.Models)
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthExcludedModels == nil {
 			c.JSON(404, gin.H{"error": "provider not found"})
@@ -1278,14 +1246,14 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		if len(h.cfg.OAuthExcludedModels) == 0 {
 			h.cfg.OAuthExcludedModels = nil
 		}
-		h.persistLocked(c)
+		h.persist(c)
 		return
 	}
 	if h.cfg.OAuthExcludedModels == nil {
 		h.cfg.OAuthExcludedModels = make(map[string][]string)
 	}
 	h.cfg.OAuthExcludedModels[provider] = normalized
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
@@ -1294,8 +1262,6 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing provider"})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.cfg.OAuthExcludedModels == nil {
 		c.JSON(404, gin.H{"error": "provider not found"})
 		return
@@ -1308,7 +1274,7 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 	if len(h.cfg.OAuthExcludedModels) == 0 {
 		h.cfg.OAuthExcludedModels = nil
 	}
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 // oauth-model-alias: map[string][]OAuthModelAlias
@@ -1333,10 +1299,8 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
@@ -1363,8 +1327,6 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthModelAlias == nil {
 			c.JSON(404, gin.H{"error": "channel not found"})
@@ -1378,14 +1340,14 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		if len(h.cfg.OAuthModelAlias) == 0 {
 			h.cfg.OAuthModelAlias = nil
 		}
-		h.persistLocked(c)
+		h.persist(c)
 		return
 	}
 	if h.cfg.OAuthModelAlias == nil {
 		h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 	}
 	h.cfg.OAuthModelAlias[channel] = normalized
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -1397,8 +1359,6 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.cfg.OAuthModelAlias == nil {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
@@ -1411,7 +1371,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	if len(h.cfg.OAuthModelAlias) == 0 {
 		h.cfg.OAuthModelAlias = nil
 	}
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 // oauth-request-scoped-errors: map[string][]RequestScopedErrorRule
@@ -1436,10 +1396,8 @@ func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.cfg.OAuthRequestScopedErrors = sanitizedOAuthRequestScopedErrors(entries)
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
@@ -1466,8 +1424,6 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 
 	normalizedMap := sanitizedOAuthRequestScopedErrors(map[string][]config.RequestScopedErrorRule{channel: body.Rules})
 	normalized := normalizedMap[channel]
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if len(normalized) == 0 {
 		if h.cfg.OAuthRequestScopedErrors == nil {
 			c.JSON(404, gin.H{"error": "channel not found"})
@@ -1481,14 +1437,14 @@ func (h *Handler) PatchOAuthRequestScopedErrors(c *gin.Context) {
 		if len(h.cfg.OAuthRequestScopedErrors) == 0 {
 			h.cfg.OAuthRequestScopedErrors = nil
 		}
-		h.persistLocked(c)
+		h.persist(c)
 		return
 	}
 	if h.cfg.OAuthRequestScopedErrors == nil {
 		h.cfg.OAuthRequestScopedErrors = make(map[string][]config.RequestScopedErrorRule)
 	}
 	h.cfg.OAuthRequestScopedErrors[channel] = normalized
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
@@ -1500,8 +1456,6 @@ func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.cfg.OAuthRequestScopedErrors == nil {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
@@ -1514,7 +1468,7 @@ func (h *Handler) DeleteOAuthRequestScopedErrors(c *gin.Context) {
 	if len(h.cfg.OAuthRequestScopedErrors) == 0 {
 		h.cfg.OAuthRequestScopedErrors = nil
 	}
-	h.persistLocked(c)
+	h.persist(c)
 }
 
 // codex-api-key: []CodexKey
@@ -1559,20 +1513,18 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
-		APIKey               *string                          `json:"api-key"`
-		Priority             *int                             `json:"priority"`
-		Weight               json.RawMessage                  `json:"weight"`
-		Prefix               *string                          `json:"prefix"`
-		BaseURL              *string                          `json:"base-url"`
-		ProxyURL             *string                          `json:"proxy-url"`
-		AlphaSearch          *bool                            `json:"alpha-search"`
-		Models               *[]config.CodexModel             `json:"models"`
-		Headers              *map[string]string               `json:"headers"`
-		ExcludedModels       *[]string                        `json:"excluded-models"`
-		DisableCooling       json.RawMessage                  `json:"disable-cooling"`
-		DisableCodexCloaking json.RawMessage                  `json:"disable-codex-cloaking"`
-		RequestRetry         *int                             `json:"request-retry"`
-		RequestScopedErrors  *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
+		APIKey              *string                          `json:"api-key"`
+		Weight              json.RawMessage                  `json:"weight"`
+		Prefix              *string                          `json:"prefix"`
+		BaseURL             *string                          `json:"base-url"`
+		ProxyURL            *string                          `json:"proxy-url"`
+		AlphaSearch         *bool                            `json:"alpha-search"`
+		Models              *[]config.CodexModel             `json:"models"`
+		Headers             *map[string]string               `json:"headers"`
+		ExcludedModels      *[]string                        `json:"excluded-models"`
+		DisableCooling      json.RawMessage                  `json:"disable-cooling"`
+		RequestRetry        *int                             `json:"request-retry"`
+		RequestScopedErrors *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1607,9 +1559,6 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	entry := h.cfg.CodexKey[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.Priority != nil {
-		entry.Priority = *body.Value.Priority
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1648,9 +1597,6 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
 	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
-		return
-	}
-	if !applyDisableCodexCloakingPatch(c, body.Value.DisableCodexCloaking, &entry.DisableCodexCloaking) {
 		return
 	}
 	if body.Value.RequestRetry != nil {
@@ -2118,23 +2064,6 @@ func applyDisableCoolingPatch(c *gin.Context, raw json.RawMessage, target **bool
 	var value bool
 	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
 		c.JSON(400, gin.H{"error": "disable-cooling must be a boolean or null"})
-		return false
-	}
-	*target = &value
-	return true
-}
-
-func applyDisableCodexCloakingPatch(c *gin.Context, raw json.RawMessage, target **bool) bool {
-	if len(raw) == 0 {
-		return true
-	}
-	if strings.TrimSpace(string(raw)) == "null" {
-		*target = nil
-		return true
-	}
-	var value bool
-	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
-		c.JSON(400, gin.H{"error": "disable-codex-cloaking must be a boolean or null"})
 		return false
 	}
 	*target = &value

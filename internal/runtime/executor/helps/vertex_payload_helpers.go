@@ -1,53 +1,86 @@
 package helps
 
 import (
-	"fmt"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // StripVertexOpenAIResponsesToolCallIDs removes OpenAI Responses call IDs that
 // Vertex rejects in Gemini functionCall/functionResponse payloads.
 func StripVertexOpenAIResponsesToolCallIDs(payload []byte, sourceFormat string) []byte {
-	if len(payload) == 0 || !strings.EqualFold(strings.TrimSpace(sourceFormat), "openai-response") {
+	if !strings.EqualFold(strings.TrimSpace(sourceFormat), "openai-response") {
 		return payload
 	}
-	doc := ojson.NewDoc(payload)
-	if !StripVertexOpenAIResponsesToolCallIDsDoc(doc, sourceFormat) {
+
+	contents := util.GetGJSONBytesNoCopy(payload, "contents")
+	if !contents.IsArray() || !vertexContentsHaveToolCallIDs(contents) {
 		return payload
 	}
-	return doc.Bytes()
-}
 
-// StripVertexOpenAIResponsesToolCallIDsDoc removes OpenAI Responses call IDs that
-// Vertex rejects in Gemini functionCall/functionResponse payloads in place on doc.
-func StripVertexOpenAIResponsesToolCallIDsDoc(doc *ojson.Doc, sourceFormat string) bool {
-	if doc == nil || doc.Len() == 0 || !strings.EqualFold(strings.TrimSpace(sourceFormat), "openai-response") {
-		return false
-	}
-
-	contents := doc.Get("contents")
-	if !contents.IsArray() {
-		return false
-	}
-
-	changed := false
-	for cIdx, content := range contents.Array() {
+	contentsChanged := false
+	contentItems := make([][]byte, 0, int(contents.Get("#").Int()))
+	contents.ForEach(func(_, content gjson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
-			continue
+			contentItems = append(contentItems, []byte(content.Raw))
+			return true
 		}
-		for pIdx, part := range parts.Array() {
-			for _, field := range []string{"functionCall.id", "functionResponse.id"} {
-				if !part.Get(field).Exists() {
+
+		partsChanged := false
+		partItems := make([][]byte, 0, int(parts.Get("#").Int()))
+		parts.ForEach(func(_, part gjson.Result) bool {
+			partJSON := []byte(part.Raw)
+			for _, path := range []string{"functionCall.id", "functionResponse.id"} {
+				if !part.Get(path).Exists() {
 					continue
 				}
-				if errDel := doc.Delete(fmt.Sprintf("contents.%d.parts.%d.%s", cIdx, pIdx, field)); errDel == nil {
-					changed = true
+				updated, errDelete := sjson.DeleteBytes(partJSON, path)
+				if errDelete == nil {
+					partJSON = updated
+					partsChanged = true
 				}
 			}
+			partItems = append(partItems, partJSON)
+			return true
+		})
+
+		contentJSON := []byte(content.Raw)
+		if partsChanged {
+			updated, errSet := sjson.SetRawBytes(contentJSON, "parts", JoinRawJSONArray(partItems))
+			if errSet == nil {
+				contentJSON = updated
+				contentsChanged = true
+			}
 		}
+		contentItems = append(contentItems, contentJSON)
+		return true
+	})
+	if !contentsChanged {
+		return payload
 	}
-	return changed
+
+	updated, errSet := sjson.SetRawBytes(payload, "contents", JoinRawJSONArray(contentItems))
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+func vertexContentsHaveToolCallIDs(contents gjson.Result) bool {
+	hasIDs := false
+	contents.ForEach(func(_, content gjson.Result) bool {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			return true
+		}
+		parts.ForEach(func(_, part gjson.Result) bool {
+			hasIDs = part.Get("functionCall.id").Exists() || part.Get("functionResponse.id").Exists()
+			return !hasIDs
+		})
+		return !hasIDs
+	})
+	return hasIDs
 }

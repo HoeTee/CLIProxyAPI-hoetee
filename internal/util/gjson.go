@@ -3,7 +3,7 @@ package util
 import (
 	"unsafe"
 
-	gjson "github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
 )
 
 // GetGJSONBytesNoCopy returns a GJSON result that may reference data directly.
@@ -12,7 +12,7 @@ func GetGJSONBytesNoCopy(data []byte, path string) gjson.Result {
 	if len(data) == 0 {
 		return gjson.Result{}
 	}
-	return gjson.GetBytesNoCopy(data, path)
+	return gjson.Get(unsafe.String(unsafe.SliceData(data), len(data)), path)
 }
 
 // ParseGJSONBytesNoCopy parses data into a GJSON result that references data

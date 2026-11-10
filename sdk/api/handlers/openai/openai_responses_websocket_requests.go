@@ -8,10 +8,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func normalizeResponsesWebsocketRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
@@ -27,7 +28,7 @@ func normalizeResponsesWebsocketRequestWithLastResponseID(rawJSON []byte, lastRe
 }
 
 func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, lastResponsePendingToolCallIDs []string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
-	requestType := strings.TrimSpace(ojson.GetBytesNoCopy(rawJSON, "type").String())
+	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	switch requestType {
 	case wsRequestTypeCreate:
 		// log.Infof("responses websocket: response.create request")
@@ -46,8 +47,8 @@ func normalizeResponsesWebsocketRequestWithIncrementalState(rawJSON []byte, last
 	}
 }
 
-func normalizeResponseCreateRequestDoc(doc *ojson.Doc) ([]byte, []byte, *interfaces.ErrorMessage) {
-	input := doc.Get("input")
+func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
+	input := gjson.GetBytes(rawJSON, "input")
 	if input.Exists() && !input.IsArray() {
 		return nil, nil, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -55,31 +56,23 @@ func normalizeResponseCreateRequestDoc(doc *ojson.Doc) ([]byte, []byte, *interfa
 		}
 	}
 
-	_ = doc.Delete("type")
-	_ = doc.Set("stream", true)
-	if !input.Exists() {
-		_ = doc.SetRawBytes("input", []byte("[]"))
+	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
+	if errDelete != nil {
+		normalized = bytes.Clone(rawJSON)
+	}
+	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	if !gjson.GetBytes(normalized, "input").Exists() {
+		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte("[]"))
 	}
 
-	modelName := strings.TrimSpace(doc.Get("model").String())
+	modelName := strings.TrimSpace(gjson.GetBytes(normalized, "model").String())
 	if modelName == "" {
 		return nil, nil, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      fmt.Errorf("missing model in response.create request"),
 		}
 	}
-	normalized := doc.Bytes()
 	return normalized, bytes.Clone(normalized), nil
-}
-
-func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
-	return normalizeResponseCreateRequestDoc(ojson.NewDoc(rawJSON))
-}
-
-func normalizeResponseCreateTranscriptReplacement(rawJSON []byte, lastRequest []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
-	doc := ojson.NewDoc(rawJSON)
-	normalizeResponseTranscriptReplacementDoc(doc, lastRequest)
-	return normalizeResponseCreateRequestDoc(doc)
 }
 
 func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, lastResponseID string, lastResponsePendingToolCallIDs []string, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
@@ -90,7 +83,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 
-	nextInput := ojson.GetBytesNoCopy(rawJSON, "input")
+	nextInput := gjson.GetBytes(rawJSON, "input")
 	if !nextInput.Exists() || !nextInput.IsArray() {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -107,41 +100,36 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		return normalized, bytes.Clone(normalized), nil
 	}
 
-	// A request without previous_response_id that leaves the last response's tool
-	// calls unanswered cannot extend that response: appending it to the stale turn
-	// would send those function_call items without outputs. Treat it as a
-	// replacement transcript in every upstream mode (e.g. a client-side compaction
-	// summary that carries no compaction markers).
-	prev := strings.TrimSpace(ojson.GetBytesNoCopy(rawJSON, "previous_response_id").String())
-	if prev == "" && !inputSatisfiesPendingToolCalls(nextInput, lastResponsePendingToolCallIDs) {
-		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
-		return normalized, bytes.Clone(normalized), nil
-	}
-
 	// Websocket v2 mode uses response.create with previous_response_id + incremental input.
 	// Do not expand it into a full input transcript; upstream expects the incremental payload.
 	if allowIncrementalInputWithPreviousResponseID {
+		prev := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String())
 		if prev == "" {
+			if !inputSatisfiesPendingToolCalls(nextInput, lastResponsePendingToolCallIDs) {
+				normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+				return normalized, bytes.Clone(normalized), nil
+			}
 			prev = strings.TrimSpace(lastResponseID)
 		}
 		if prev != "" {
-			doc := ojson.NewDoc(rawJSON)
-			_ = doc.Delete("type")
-			_ = doc.Set("previous_response_id", prev)
-			if !doc.Get("model").Exists() {
-				modelName := strings.TrimSpace(ojson.GetBytesNoCopy(lastRequest, "model").String())
+			normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
+			if errDelete != nil {
+				normalized = bytes.Clone(rawJSON)
+			}
+			normalized, _ = sjson.SetBytes(normalized, "previous_response_id", prev)
+			if !gjson.GetBytes(normalized, "model").Exists() {
+				modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 				if modelName != "" {
-					_ = doc.Set("model", modelName)
+					normalized, _ = sjson.SetBytes(normalized, "model", modelName)
 				}
 			}
-			if !doc.Get("instructions").Exists() {
-				instructions := ojson.GetBytesNoCopy(lastRequest, "instructions")
+			if !gjson.GetBytes(normalized, "instructions").Exists() {
+				instructions := gjson.GetBytes(lastRequest, "instructions")
 				if instructions.Exists() {
-					_ = doc.SetRawBytes("instructions", []byte(instructions.Raw))
+					normalized, _ = sjson.SetRawBytes(normalized, "instructions", []byte(instructions.Raw))
 				}
 			}
-			_ = doc.Set("stream", true)
-			normalized := doc.Bytes()
+			normalized, _ = sjson.SetBytes(normalized, "stream", true)
 			return normalized, bytes.Clone(normalized), nil
 		}
 	}
@@ -171,26 +159,41 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 
-	doc := ojson.NewDoc(rawJSON)
-	normalizeResponseTranscriptReplacementDoc(doc, lastRequest)
-	if errSet := doc.SetRawBytes("input", mergedInput); errSet != nil {
+	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
+	if errDelete != nil {
+		normalized = bytes.Clone(rawJSON)
+	}
+	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
+	if !gjson.GetBytes(normalized, "model").Exists() {
+		modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+		if modelName != "" {
+			normalized, _ = sjson.SetBytes(normalized, "model", modelName)
+		}
+	}
+	if !gjson.GetBytes(normalized, "instructions").Exists() {
+		instructions := gjson.GetBytes(lastRequest, "instructions")
+		if instructions.Exists() {
+			normalized, _ = sjson.SetRawBytes(normalized, "instructions", []byte(instructions.Raw))
+		}
+	}
+	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	var errSet error
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", mergedInput)
+	if errSet != nil {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      fmt.Errorf("failed to merge websocket input: %w", errSet),
 		}
 	}
-	normalized := doc.Bytes()
 	return normalized, normalized, nil
 }
 
-func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput ojson.Result) bool {
-	var fieldsBuf [2]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], rawJSON, "type", "previous_response_id")
-	requestType := strings.TrimSpace(fields[0].String())
+func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bool {
+	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
 		return false
 	}
-	previousResponseID := fields[1]
+	previousResponseID := gjson.GetBytes(rawJSON, "previous_response_id")
 	if strings.TrimSpace(previousResponseID.String()) != "" {
 		return false
 	}
@@ -215,7 +218,7 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput ojson.Result) bo
 	return false
 }
 
-func inputHasCodexLocalCompactionSummary(input ojson.Result) bool {
+func inputHasCodexLocalCompactionSummary(input gjson.Result) bool {
 	if !input.IsArray() {
 		return false
 	}
@@ -250,9 +253,9 @@ func inputHasCodexLocalCompactionSummary(input ojson.Result) bool {
 	return hasSummary
 }
 
-func codexLocalCompactionMessageText(message ojson.Result) string {
+func codexLocalCompactionMessageText(message gjson.Result) string {
 	content := message.Get("content")
-	if content.Type == ojson.String {
+	if content.Type == gjson.String {
 		return content.String()
 	}
 	if !content.IsArray() {
@@ -268,7 +271,7 @@ func codexLocalCompactionMessageText(message ojson.Result) string {
 	return text.String()
 }
 
-func inputSatisfiesPendingToolCalls(input ojson.Result, pendingCallIDs []string) bool {
+func inputSatisfiesPendingToolCalls(input gjson.Result, pendingCallIDs []string) bool {
 	if len(pendingCallIDs) == 0 {
 		return true
 	}
@@ -297,28 +300,26 @@ func inputSatisfiesPendingToolCalls(input ojson.Result, pendingCallIDs []string)
 	return true
 }
 
-func normalizeResponseTranscriptReplacementDoc(doc *ojson.Doc, lastRequest []byte) {
-	_ = doc.Delete("type")
-	_ = doc.Delete("previous_response_id")
-	if !doc.Get("model").Exists() {
-		modelName := strings.TrimSpace(ojson.GetBytesNoCopy(lastRequest, "model").String())
-		if modelName != "" {
-			_ = doc.Set("model", modelName)
-		}
-	}
-	if !doc.Get("instructions").Exists() {
-		instructions := ojson.GetBytesNoCopy(lastRequest, "instructions")
-		if instructions.Exists() {
-			_ = doc.SetRawBytes("instructions", []byte(instructions.Raw))
-		}
-	}
-	_ = doc.Set("stream", true)
-}
-
 func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) []byte {
-	doc := ojson.NewDoc(rawJSON)
-	normalizeResponseTranscriptReplacementDoc(doc, lastRequest)
-	return doc.Bytes()
+	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
+	if errDelete != nil {
+		normalized = bytes.Clone(rawJSON)
+	}
+	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
+	if !gjson.GetBytes(normalized, "model").Exists() {
+		modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+		if modelName != "" {
+			normalized, _ = sjson.SetBytes(normalized, "model", modelName)
+		}
+	}
+	if !gjson.GetBytes(normalized, "instructions").Exists() {
+		instructions := gjson.GetBytes(lastRequest, "instructions")
+		if instructions.Exists() {
+			normalized, _ = sjson.SetRawBytes(normalized, "instructions", []byte(instructions.Raw))
+		}
+	}
+	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	return bytes.Clone(normalized)
 }
 
 type responsesWebsocketInputItem struct {
@@ -336,145 +337,6 @@ type responsesWebsocketMergeInputItem struct {
 	itemType string
 	id       string
 	callID   string
-}
-
-// responsesWebsocketReplayPassthroughPath is the passthrough object that can
-// carry output-only upstream fields on response items.
-const responsesWebsocketReplayPassthroughPath = "internal_chat_message_metadata_passthrough"
-
-// responsesWebsocketReplaySanitizedItem removes every output-only
-// content_token_count member from a valid response item that CPA replays as
-// input, along with every passthrough object left empty. Parent and child
-// members are matched by their decoded key names, including duplicates and
-// escaped spellings. Retained members are rebuilt from raw field slices
-// without reserializing values; invalid items return unchanged.
-func responsesWebsocketReplaySanitizedItem(raw string) string {
-	if !responsesWebsocketReplayMayContainPassthroughKey(raw) || !json.Valid([]byte(raw)) {
-		return raw
-	}
-	item := ojson.Parse(raw)
-	if !item.IsObject() || item.Raw != raw {
-		return raw
-	}
-	cleaned, changed := responsesWebsocketSanitizeReplayResult(item)
-	if !changed {
-		return raw
-	}
-	return string(cleaned)
-}
-
-// responsesWebsocketReplaySanitizedBytes is the []byte form used by upstream
-// cache recording entries. Unchanged items return the caller's slice so the
-// storage layer still performs its single detached ownership copy.
-func responsesWebsocketReplaySanitizedBytes(raw []byte) []byte {
-	if len(raw) == 0 || !json.Valid(raw) {
-		return raw
-	}
-	item := util.ParseGJSONBytesNoCopy(raw)
-	if !item.IsObject() || len(item.Raw) != len(raw) || !responsesWebsocketReplayMayContainPassthroughKey(item.Raw) {
-		return raw
-	}
-	cleaned, changed := responsesWebsocketSanitizeReplayResult(item)
-	if !changed {
-		return raw
-	}
-	return cleaned
-}
-
-// responsesWebsocketReplayMayContainPassthroughKey is a conservative,
-// copy-free screen. A decoded passthrough key contains an underscore and the
-// fragments on either side of one underscore; Unicode escapes therefore
-// require the universal \\u prefix, while literal spellings contain either
-// "internal" or "chat_message_metadata_passthrough".
-func responsesWebsocketReplayMayContainPassthroughKey(raw string) bool {
-	return strings.Contains(raw, "internal") ||
-		strings.Contains(raw, "chat_message_metadata_passthrough") ||
-		strings.Contains(raw, `\u`)
-}
-
-func responsesWebsocketSanitizeReplayResult(item ojson.Result) ([]byte, bool) {
-	memberCount := len(item.Map())
-	if memberCount == 0 {
-		return nil, false
-	}
-	members := make([]struct{ key, value string }, 0, memberCount)
-	changed := false
-	invalid := false
-	item.ForEach(func(key, value ojson.Result) bool {
-		if key.Raw == "" || value.Raw == "" {
-			invalid = true
-			return false
-		}
-		valueRaw := value.Raw
-		if key.String() == responsesWebsocketReplayPassthroughPath && value.IsObject() {
-			cleaned, valueChanged, keep := responsesWebsocketSanitizePassthroughObject(value)
-			if valueChanged {
-				changed = true
-				if !keep {
-					return true
-				}
-				valueRaw = cleaned
-			}
-		}
-		members = append(members, struct{ key, value string }{key: key.Raw, value: valueRaw})
-		return true
-	})
-	if invalid || !changed {
-		return nil, false
-	}
-
-	out := make([]byte, 0, len(item.Raw))
-	out = append(out, '{')
-	for index, member := range members {
-		if index > 0 {
-			out = append(out, ',')
-		}
-		out = append(out, member.key...)
-		out = append(out, ':')
-		out = append(out, member.value...)
-	}
-	out = append(out, '}')
-	return out, true
-}
-
-// responsesWebsocketSanitizePassthroughObject drops every decoded
-// content_token_count member from a passthrough object. Members are collected
-// as raw slices and materialized only after a removal is confirmed.
-func responsesWebsocketSanitizePassthroughObject(passthrough ojson.Result) (string, bool, bool) {
-	members := make([]struct{ key, value string }, 0, len(passthrough.Map()))
-	removed := false
-	invalid := false
-	passthrough.ForEach(func(key, value ojson.Result) bool {
-		if key.String() == "content_token_count" {
-			removed = true
-			return true
-		}
-		if key.Raw == "" || value.Raw == "" {
-			invalid = true
-			return false
-		}
-		members = append(members, struct{ key, value string }{key: key.Raw, value: value.Raw})
-		return true
-	})
-	if invalid || !removed {
-		return "", false, len(passthrough.Map()) > 0
-	}
-	if len(members) == 0 {
-		return "{}", true, false
-	}
-
-	out := make([]byte, 0, len(passthrough.Raw))
-	out = append(out, '{')
-	for index, member := range members {
-		if index > 0 {
-			out = append(out, ',')
-		}
-		out = append(out, member.key...)
-		out = append(out, ':')
-		out = append(out, member.value...)
-	}
-	out = append(out, '}')
-	return string(out), true, true
 }
 
 func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) ([]byte, error) {
@@ -495,17 +357,10 @@ func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte,
 				return item.itemType == "compaction_trigger"
 			})
 		}
-		itemCountBeforeResponse := len(items)
 		var errResponse error
 		items, errResponse = appendResponsesWebsocketMergeInputResult(items, responseInput)
 		if errResponse != nil {
 			return nil, fmt.Errorf("invalid previous response output: %w", errResponse)
-		}
-		// Replayed response items become upstream input. Drop output-only
-		// fields the client never sends so another credential cannot reject
-		// them; previous-request and appended client items stay untouched.
-		for index := itemCountBeforeResponse; index < len(items); index++ {
-			items[index].raw = responsesWebsocketReplaySanitizedItem(items[index].raw)
 		}
 	}
 
@@ -519,23 +374,23 @@ func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte,
 	return marshalResponsesWebsocketMergeInputItems(items), nil
 }
 
-func responsesWebsocketPreviousInputNoCopy(lastRequest []byte) (ojson.Result, error) {
+func responsesWebsocketPreviousInputNoCopy(lastRequest []byte) (gjson.Result, error) {
 	if !json.Valid(lastRequest) {
-		return ojson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
 	}
 
 	root := util.ParseGJSONBytesNoCopy(lastRequest)
-	if root.Type == ojson.Null {
-		return ojson.Parse("[]"), nil
+	if root.Type == gjson.Null {
+		return gjson.Parse("[]"), nil
 	}
 	if !root.IsObject() {
-		return ojson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
 	}
 
-	var input ojson.Result
+	var input gjson.Result
 	inputFound := false
 	invalidInput := false
-	root.ForEach(func(key, value ojson.Result) bool {
+	root.ForEach(func(key, value gjson.Result) bool {
 		if !strings.EqualFold(key.String(), "input") {
 			return true
 		}
@@ -545,16 +400,16 @@ func responsesWebsocketPreviousInputNoCopy(lastRequest []byte) (ojson.Result, er
 		// selected array out of the caller-owned request buffer.
 		inputFound = true
 		input = value
-		if value.Type != ojson.Null && !value.IsArray() {
+		if value.Type != gjson.Null && !value.IsArray() {
 			invalidInput = true
 		}
 		return true
 	})
 	if invalidInput {
-		return ojson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
 	}
-	if !inputFound || input.Type == ojson.Null {
-		return ojson.Parse("[]"), nil
+	if !inputFound || input.Type == gjson.Null {
+		return gjson.Parse("[]"), nil
 	}
 	return input, nil
 }
@@ -571,8 +426,8 @@ func appendResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInpu
 	if rawArray == "" {
 		rawArray = "[]"
 	}
-	parsed := ojson.Parse(rawArray)
-	if ojson.Valid(rawArray) {
+	parsed := gjson.Parse(rawArray)
+	if gjson.Valid(rawArray) {
 		return appendResponsesWebsocketMergeInputResult(items, parsed)
 	}
 
@@ -583,8 +438,8 @@ func appendResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInpu
 	return items, nil
 }
 
-func appendResponsesWebsocketMergeInputResult(items []responsesWebsocketMergeInputItem, input ojson.Result) ([]responsesWebsocketMergeInputItem, error) {
-	if input.Type == ojson.Null {
+func appendResponsesWebsocketMergeInputResult(items []responsesWebsocketMergeInputItem, input gjson.Result) ([]responsesWebsocketMergeInputItem, error) {
+	if input.Type == gjson.Null {
 		return items, nil
 	}
 	if !input.IsArray() {
@@ -600,7 +455,7 @@ func appendResponsesWebsocketMergeInputResult(items []responsesWebsocketMergeInp
 	for _, rawItem := range rawItems {
 		item := responsesWebsocketMergeInputItem{raw: rawItem.Raw}
 		if rawItem.IsObject() {
-			rawItem.ForEach(func(key, value ojson.Result) bool {
+			rawItem.ForEach(func(key, value gjson.Result) bool {
 				metadataKey := key.String()
 				switch {
 				case strings.EqualFold(metadataKey, "type"):
@@ -833,7 +688,7 @@ func dedupeResponsesWebsocketInputItems(items []responsesWebsocketInputItem) []r
 }
 
 func dedupeResponsesWebsocketInputItemsByID(payload []byte) []byte {
-	input := ojson.GetBytesNoCopy(payload, "input")
+	input := gjson.GetBytes(payload, "input")
 	if !input.Exists() || !input.IsArray() {
 		return payload
 	}
@@ -841,7 +696,7 @@ func dedupeResponsesWebsocketInputItemsByID(payload []byte) []byte {
 	if errDedupe != nil || dedupedInput == input.Raw {
 		return payload
 	}
-	updated, errSet := ojson.SetRawBytes(payload, "input", []byte(dedupedInput))
+	updated, errSet := sjson.SetRawBytes(payload, "input", []byte(dedupedInput))
 	if errSet != nil {
 		return payload
 	}
@@ -864,9 +719,7 @@ func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName str
 		}
 	}
 
-	var fieldsBuf [2]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], rawJSON, "type", "model")
-	requestType := strings.TrimSpace(fields[0].String())
+	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	switch requestType {
 	case wsRequestTypeCreate, wsRequestTypeAppend:
 	default:
@@ -876,8 +729,8 @@ func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName str
 		}
 	}
 
-	doc := ojson.NewDoc(rawJSON)
-	if strings.TrimSpace(fields[1].String()) == "" {
+	normalized := bytes.Clone(rawJSON)
+	if strings.TrimSpace(gjson.GetBytes(normalized, "model").String()) == "" {
 		modelName = strings.TrimSpace(modelName)
 		if modelName == "" {
 			return nil, &interfaces.ErrorMessage{
@@ -885,8 +738,8 @@ func normalizeResponsesWebsocketPassthroughRequest(rawJSON []byte, modelName str
 				Error:      fmt.Errorf("missing model in response.create request"),
 			}
 		}
-		_ = doc.Set("model", modelName)
+		normalized, _ = sjson.SetBytes(normalized, "model", modelName)
 	}
-	_ = doc.Set("stream", true)
-	return doc.Bytes(), nil
+	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	return normalized, nil
 }

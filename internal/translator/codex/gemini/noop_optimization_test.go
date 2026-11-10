@@ -3,14 +3,13 @@ package gemini
 import (
 	"testing"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/tidwall/gjson"
 )
 
 func TestCleanGeminiCodexToolParametersPreservesCanonicalSchema(t *testing.T) {
 	input := []byte(`{"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false}`)
 
-	output := cleanGeminiCodexToolParameters(util.ParseGJSONBytesNoCopy(input))
+	output := cleanGeminiCodexToolParameters(gjson.ParseBytes(input))
 
 	if string(output) != string(input) {
 		t.Fatalf("canonical schema changed:\n got: %s\nwant: %s", output, input)
@@ -19,7 +18,7 @@ func TestCleanGeminiCodexToolParametersPreservesCanonicalSchema(t *testing.T) {
 
 func TestSetCodexToolChoiceFromGeminiToolConfigReusesAutoChoice(t *testing.T) {
 	input := []byte(`{"tool_choice":"auto","input":[]}`)
-	config := ojson.Parse(`{"mode":"AUTO"}`)
+	config := gjson.Parse(`{"mode":"AUTO"}`)
 
 	output := setCodexToolChoiceFromGeminiToolConfig(input, config)
 
@@ -31,12 +30,12 @@ func TestSetCodexToolChoiceFromGeminiToolConfigReusesAutoChoice(t *testing.T) {
 func TestCleanGeminiCodexToolParametersNormalizesSchema(t *testing.T) {
 	input := []byte(`{"type":"object","$schema":"draft","additionalProperties":true}`)
 
-	output := cleanGeminiCodexToolParameters(util.ParseGJSONBytesNoCopy(input))
+	output := cleanGeminiCodexToolParameters(gjson.ParseBytes(input))
 
-	if ojson.GetBytesNoCopy(output, "$schema").Exists() {
+	if gjson.GetBytes(output, "$schema").Exists() {
 		t.Fatal("$schema should be removed")
 	}
-	if additionalProperties := ojson.GetBytesNoCopy(output, "additionalProperties"); additionalProperties.Type != ojson.False {
+	if additionalProperties := gjson.GetBytes(output, "additionalProperties"); additionalProperties.Type != gjson.False {
 		t.Fatalf("additionalProperties = %s, want false", additionalProperties.Raw)
 	}
 }

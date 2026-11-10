@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MoeForge/moego/ojson"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 type interactionsToClaudeStreamState struct {
@@ -48,66 +48,66 @@ func ConvertInteractionsResponseToClaude(_ context.Context, modelName string, or
 func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
-	root := util.ParseGJSONBytesNoCopy(rawJSON)
+	root := gjson.ParseBytes(rawJSON)
 	interaction := root
 	if nested := root.Get("interaction"); nested.Exists() {
 		interaction = nested
 	}
-	outDoc := ojson.NewDocString(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
-	_ = outDoc.Set("id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("msg_%d", time.Now().UnixNano())))
-	_ = outDoc.Set("model", firstNonEmpty(interaction.Get("model").String(), modelName))
+	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("msg_%d", time.Now().UnixNano())))
+	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(interaction.Get("model").String(), modelName))
 	steps := interaction.Get("steps")
 	if !steps.Exists() {
 		steps = root.Get("steps")
 	}
 	sawToolCall := false
 	var contentBlocks [][]byte
-	steps.ForEach(func(_, step ojson.Result) bool {
+	steps.ForEach(func(_, step gjson.Result) bool {
 		switch step.Get("type").String() {
 		case "thought":
 			for _, text := range interactionsContentTexts(step.Get("content")) {
-				blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
-				_ = blockDoc.Set("thinking", text)
+				block := []byte(`{"type":"thinking","thinking":""}`)
+				block, _ = sjson.SetBytes(block, "thinking", text)
 				if signature := interactionsSignature(step); signature != "" {
-					_ = blockDoc.Set("signature", signature)
+					block, _ = sjson.SetBytes(block, "signature", signature)
 				}
-				contentBlocks = append(contentBlocks, blockDoc.Bytes())
+				contentBlocks = append(contentBlocks, block)
 			}
 		case "function_call":
 			sawToolCall = true
-			blockDoc := ojson.NewDocString(`{"type":"tool_use","id":"","name":"","input":{}}`)
-			_ = blockDoc.Set("id", interactionsToolID(step))
-			_ = blockDoc.Set("name", step.Get("name").String())
+			block := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+			block, _ = sjson.SetBytes(block, "id", interactionsToolID(step))
+			block, _ = sjson.SetBytes(block, "name", step.Get("name").String())
 			if signature := interactionsSignature(step); signature != "" {
-				_ = blockDoc.Set("signature", signature)
+				block, _ = sjson.SetBytes(block, "signature", signature)
 			}
 			args := firstExisting(step, "arguments", "args")
 			if args.Exists() && args.IsObject() {
-				_ = blockDoc.SetRaw("input", args.Raw)
+				block, _ = sjson.SetRawBytes(block, "input", []byte(args.Raw))
 			}
-			contentBlocks = append(contentBlocks, blockDoc.Bytes())
+			contentBlocks = append(contentBlocks, block)
 		default:
 			for _, text := range interactionsContentTexts(step.Get("content")) {
 				block := []byte(`{"type":"text","text":""}`)
-				block, _ = ojson.SetBytes(block, "text", text)
+				block, _ = sjson.SetBytes(block, "text", text)
 				contentBlocks = append(contentBlocks, block)
 			}
 		}
 		return true
 	})
 	if len(contentBlocks) > 0 {
-		translatorcommon.SetRawArrayItemsDoc(outDoc, "content", contentBlocks)
+		out = translatorcommon.SetRawArrayItems(out, "content", contentBlocks)
 	}
 	if sawToolCall {
-		_ = outDoc.Set("stop_reason", "tool_use")
+		out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
 	}
 	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
 	finishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
 	if status == "incomplete" || finishReason == "length" || finishReason == "max_tokens" {
-		_ = outDoc.Set("stop_reason", "max_tokens")
+		out, _ = sjson.SetBytes(out, "stop_reason", "max_tokens")
 	}
-	setClaudeUsageFromInteractionsDoc(outDoc, "usage", translatorcommon.InteractionsUsage(root))
-	return outDoc.Bytes()
+	out = setClaudeUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
+	return out
 }
 
 func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *interactionsToClaudeStreamState) [][]byte {
@@ -118,15 +118,15 @@ func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *inte
 	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 		return appendClaudeMessageStop(nil, st)
 	}
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := gjson.ParseBytes(payload)
 	if !root.Exists() {
 		return nil
 	}
 	switch root.Get("event_type").String() {
 	case "interaction.created":
 		interaction := root.Get("interaction")
-		st.ID = strings.Clone(firstNonEmpty(interaction.Get("id").String(), st.ID))
-		st.Model = strings.Clone(firstNonEmpty(interaction.Get("model").String(), st.Model, modelName))
+		st.ID = firstNonEmpty(interaction.Get("id").String(), st.ID)
+		st.Model = firstNonEmpty(interaction.Get("model").String(), st.Model, modelName)
 		return appendClaudeMessageStart(nil, st)
 	case "step.start":
 		return interactionsStepStartToClaude(modelName, root, st)
@@ -136,27 +136,25 @@ func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *inte
 		return appendClaudeContentBlockStop(nil, st)
 	case "interaction.completed", "finish":
 		return appendClaudeMessageDelta(nil, root, st)
-	case "response.failed", "interaction.failed":
-		return appendClaudeError(nil, root, st)
 	case "done":
 		return appendClaudeMessageStop(nil, st)
 	}
 	return nil
 }
 
-func interactionsStepStartToClaude(modelName string, root ojson.Result, st *interactionsToClaudeStreamState) [][]byte {
+func interactionsStepStartToClaude(modelName string, root gjson.Result, st *interactionsToClaudeStreamState) [][]byte {
 	out := appendClaudeMessageStart(nil, st)
 	out = appendClaudeContentBlockStop(out, st)
 	index := int(root.Get("index").Int())
 	step := root.Get("step")
 	stepType := step.Get("type").String()
-	st.StepTypes[index] = strings.Clone(stepType)
+	st.StepTypes[index] = stepType
 	switch stepType {
 	case "function_call":
 		st.SawToolCall = true
-		st.ToolNames[index] = strings.Clone(step.Get("name").String())
-		st.ToolIDs[index] = strings.Clone(interactionsToolID(step))
-		st.ToolSignatures[index] = strings.Clone(interactionsSignature(step))
+		st.ToolNames[index] = step.Get("name").String()
+		st.ToolIDs[index] = interactionsToolID(step)
+		st.ToolSignatures[index] = interactionsSignature(step)
 		return appendClaudeToolBlockStart(out, index, st)
 	case "thought":
 		return appendClaudeContentBlockStart(out, "thinking", st)
@@ -166,7 +164,7 @@ func interactionsStepStartToClaude(modelName string, root ojson.Result, st *inte
 	}
 }
 
-func interactionsStepDeltaToClaude(modelName string, root ojson.Result, st *interactionsToClaudeStreamState) [][]byte {
+func interactionsStepDeltaToClaude(modelName string, root gjson.Result, st *interactionsToClaudeStreamState) [][]byte {
 	index := int(root.Get("index").Int())
 	delta := root.Get("delta")
 	switch delta.Get("type").String() {
@@ -184,7 +182,7 @@ func interactionsStepDeltaToClaude(modelName string, root ojson.Result, st *inte
 		if !st.ActiveBlock || st.ActiveBlockType != "tool_use" {
 			out = appendClaudeContentBlockStop(out, st)
 			if st.ToolNames[index] == "" {
-				st.ToolNames[index] = strings.Clone(root.Get("step.name").String())
+				st.ToolNames[index] = root.Get("step.name").String()
 			}
 			if st.ToolIDs[index] == "" {
 				st.ToolIDs[index] = fmt.Sprintf("toolu_%d", index)
@@ -205,11 +203,11 @@ func appendClaudeMessageStart(out [][]byte, st *interactionsToClaudeStreamState)
 	if st.Started {
 		return out
 	}
-	msgDoc := ojson.NewDocString(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","content":[],"model":"","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
-	_ = msgDoc.Set("message.id", firstNonEmpty(st.ID, fmt.Sprintf("msg_%d", time.Now().UnixNano())))
-	_ = msgDoc.Set("message.model", st.Model)
+	msg := []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","content":[],"model":"","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
+	msg, _ = sjson.SetBytes(msg, "message.id", firstNonEmpty(st.ID, fmt.Sprintf("msg_%d", time.Now().UnixNano())))
+	msg, _ = sjson.SetBytes(msg, "message.model", st.Model)
 	st.Started = true
-	return append(out, translatorcommon.AppendSSEEventBytes(nil, "message_start", msgDoc.Bytes(), 3))
+	return append(out, translatorcommon.AppendSSEEventBytes(nil, "message_start", msg, 3))
 }
 
 func appendClaudeContentBlockStart(out [][]byte, blockType string, st *interactionsToClaudeStreamState) [][]byte {
@@ -223,7 +221,7 @@ func appendClaudeContentBlockStart(out [][]byte, blockType string, st *interacti
 	} else {
 		block = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
 	}
-	block, _ = ojson.SetBytes(block, "index", st.BlockIndex)
+	block, _ = sjson.SetBytes(block, "index", st.BlockIndex)
 	st.ActiveBlock = true
 	st.ActiveBlockType = blockType
 	return append(out, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", block, 3))
@@ -231,16 +229,16 @@ func appendClaudeContentBlockStart(out [][]byte, blockType string, st *interacti
 
 func appendClaudeToolBlockStart(out [][]byte, stepIndex int, st *interactionsToClaudeStreamState) [][]byte {
 	out = appendClaudeContentBlockStop(out, st)
-	blockDoc := ojson.NewDocString(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
-	_ = blockDoc.Set("index", st.BlockIndex)
-	_ = blockDoc.Set("content_block.id", firstNonEmpty(st.ToolIDs[stepIndex], fmt.Sprintf("toolu_%d", stepIndex)))
-	_ = blockDoc.Set("content_block.name", st.ToolNames[stepIndex])
+	block := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
+	block, _ = sjson.SetBytes(block, "index", st.BlockIndex)
+	block, _ = sjson.SetBytes(block, "content_block.id", firstNonEmpty(st.ToolIDs[stepIndex], fmt.Sprintf("toolu_%d", stepIndex)))
+	block, _ = sjson.SetBytes(block, "content_block.name", st.ToolNames[stepIndex])
 	if signature := st.ToolSignatures[stepIndex]; signature != "" {
-		_ = blockDoc.Set("content_block.signature", signature)
+		block, _ = sjson.SetBytes(block, "content_block.signature", signature)
 	}
 	st.ActiveBlock = true
 	st.ActiveBlockType = "tool_use"
-	return append(out, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", blockDoc.Bytes(), 3))
+	return append(out, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", block, 3))
 }
 
 func ensureClaudeContentBlock(out [][]byte, blockType string, st *interactionsToClaudeStreamState) [][]byte {
@@ -254,11 +252,11 @@ func appendClaudeContentDelta(out [][]byte, deltaType, field, value string, st *
 	if value == "" && deltaType != "input_json_delta" {
 		return out
 	}
-	deltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":""}}`)
-	_ = deltaDoc.Set("index", st.BlockIndex)
-	_ = deltaDoc.Set("delta.type", deltaType)
-	_ = deltaDoc.Set("delta."+field, value)
-	return append(out, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", deltaDoc.Bytes(), 3))
+	delta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":""}}`)
+	delta, _ = sjson.SetBytes(delta, "index", st.BlockIndex)
+	delta, _ = sjson.SetBytes(delta, "delta.type", deltaType)
+	delta, _ = sjson.SetBytes(delta, "delta."+field, value)
+	return append(out, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", delta, 3))
 }
 
 func appendClaudeContentBlockStop(out [][]byte, st *interactionsToClaudeStreamState) [][]byte {
@@ -266,7 +264,7 @@ func appendClaudeContentBlockStop(out [][]byte, st *interactionsToClaudeStreamSt
 		return out
 	}
 	stop := []byte(`{"type":"content_block_stop","index":0}`)
-	stop, _ = ojson.SetBytes(stop, "index", st.BlockIndex)
+	stop, _ = sjson.SetBytes(stop, "index", st.BlockIndex)
 	out = append(out, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", stop, 3))
 	st.ActiveBlock = false
 	st.ActiveBlockType = ""
@@ -274,24 +272,24 @@ func appendClaudeContentBlockStop(out [][]byte, st *interactionsToClaudeStreamSt
 	return out
 }
 
-func appendClaudeMessageDelta(out [][]byte, root ojson.Result, st *interactionsToClaudeStreamState) [][]byte {
+func appendClaudeMessageDelta(out [][]byte, root gjson.Result, st *interactionsToClaudeStreamState) [][]byte {
 	if st.Completed {
 		return out
 	}
 	out = appendClaudeMessageStart(out, st)
 	out = appendClaudeContentBlockStop(out, st)
-	payloadDoc := ojson.NewDocString(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+	payload := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 	if st.SawToolCall {
-		_ = payloadDoc.Set("delta.stop_reason", "tool_use")
+		payload, _ = sjson.SetBytes(payload, "delta.stop_reason", "tool_use")
 	}
 	interaction := root.Get("interaction")
 	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
 	finishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
 	if status == "incomplete" || finishReason == "length" || finishReason == "max_tokens" {
-		_ = payloadDoc.Set("delta.stop_reason", "max_tokens")
+		payload, _ = sjson.SetBytes(payload, "delta.stop_reason", "max_tokens")
 	}
-	setClaudeUsageFromInteractionsDoc(payloadDoc, "usage", translatorcommon.InteractionsUsage(root))
-	out = append(out, translatorcommon.AppendSSEEventBytes(nil, "message_delta", payloadDoc.Bytes(), 3))
+	payload = setClaudeUsageFromInteractions(payload, "usage", translatorcommon.InteractionsUsage(root))
+	out = append(out, translatorcommon.AppendSSEEventBytes(nil, "message_delta", payload, 3))
 	st.Completed = true
 	return out
 }
@@ -302,7 +300,7 @@ func appendClaudeMessageStop(out [][]byte, st *interactionsToClaudeStreamState) 
 	}
 	out = appendClaudeContentBlockStop(out, st)
 	if !st.Completed {
-		out = appendClaudeMessageDelta(out, ojson.Result{}, st)
+		out = appendClaudeMessageDelta(out, gjson.Result{}, st)
 	}
 	if !st.Stopped {
 		out = append(out, translatorcommon.AppendSSEEventString(nil, "message_stop", `{"type":"message_stop"}`, 3))
@@ -312,29 +310,9 @@ func appendClaudeMessageStop(out [][]byte, st *interactionsToClaudeStreamState) 
 	return out
 }
 
-func appendClaudeError(out [][]byte, root ojson.Result, st *interactionsToClaudeStreamState) [][]byte {
-	out = appendClaudeContentBlockStop(out, st)
-	errNode := root.Get("error")
-	if !errNode.Exists() {
-		errNode = root.Get("interaction.error")
-	}
-	msg := errNode.Get("message").String()
-	if msg == "" {
-		msg = "upstream error occurred"
-	}
-	errType := errNode.Get("type").String()
-	if errType == "" {
-		errType = "api_error"
-	}
-	payloadDoc := ojson.NewDocString(`{"type":"error","error":{"type":"","message":""}}`)
-	_ = payloadDoc.Set("error.type", errType)
-	_ = payloadDoc.Set("error.message", msg)
-	return append(out, translatorcommon.AppendSSEEventBytes(nil, "error", payloadDoc.Bytes(), 3))
-}
-
-func setClaudeUsageFromInteractionsDoc(doc *ojson.Doc, path string, usage ojson.Result) {
+func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result) []byte {
 	if !usage.Exists() {
-		return
+		return out
 	}
 	outputTokens, hasOutput := firstUsageInt(usage, "output_tokens", "total_output_tokens")
 	cachedTokens, hasCached := firstUsageInt(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens", "total_cached_tokens")
@@ -364,17 +342,18 @@ func setClaudeUsageFromInteractionsDoc(doc *ojson.Doc, path string, usage ojson.
 	}
 
 	if hasInput {
-		_ = doc.Set(path+".input_tokens", inputTokens)
+		out, _ = sjson.SetBytes(out, path+".input_tokens", inputTokens)
 	}
 	if hasOutput {
-		_ = doc.Set(path+".output_tokens", outputTokens)
+		out, _ = sjson.SetBytes(out, path+".output_tokens", outputTokens)
 	}
 	if hasCached && cachedTokens > 0 {
-		_ = doc.Set(path+".cache_read_input_tokens", cachedTokens)
+		out, _ = sjson.SetBytes(out, path+".cache_read_input_tokens", cachedTokens)
 	}
 	if hasCacheWrite && cacheWriteTokens > 0 {
-		_ = doc.Set(path+".cache_creation_input_tokens", cacheWriteTokens)
+		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", cacheWriteTokens)
 	}
+	return out
 }
 
 func interactionsSSEPayload(rawJSON []byte) []byte {
@@ -398,15 +377,15 @@ func interactionsSSEPayload(rawJSON []byte) []byte {
 	return trimmed
 }
 
-func interactionsContentTexts(content ojson.Result) []string {
+func interactionsContentTexts(content gjson.Result) []string {
 	if !content.Exists() {
 		return nil
 	}
-	if content.Type == ojson.String {
+	if content.Type == gjson.String {
 		return []string{content.String()}
 	}
 	var out []string
-	content.ForEach(func(_, part ojson.Result) bool {
+	content.ForEach(func(_, part gjson.Result) bool {
 		if text := firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()); text != "" {
 			out = append(out, text)
 		}
@@ -415,11 +394,11 @@ func interactionsContentTexts(content ojson.Result) []string {
 	return out
 }
 
-func interactionsToolID(root ojson.Result) string {
+func interactionsToolID(root gjson.Result) string {
 	return firstNonEmpty(root.Get("call_id").String(), root.Get("id").String(), root.Get("tool_use_id").String(), "toolu_interactions")
 }
 
-func interactionsSignature(root ojson.Result) string {
+func interactionsSignature(root gjson.Result) string {
 	return firstNonEmpty(
 		root.Get("signature").String(),
 		root.Get("thought_signature").String(),
@@ -428,16 +407,16 @@ func interactionsSignature(root ojson.Result) string {
 	)
 }
 
-func firstExisting(root ojson.Result, paths ...string) ojson.Result {
+func firstExisting(root gjson.Result, paths ...string) gjson.Result {
 	for _, path := range paths {
 		if value := root.Get(path); value.Exists() {
 			return value
 		}
 	}
-	return ojson.Result{}
+	return gjson.Result{}
 }
 
-func firstUsageInt(root ojson.Result, paths ...string) (int64, bool) {
+func firstUsageInt(root gjson.Result, paths ...string) (int64, bool) {
 	for _, path := range paths {
 		if value := root.Get(path); value.Exists() {
 			return value.Int(), true

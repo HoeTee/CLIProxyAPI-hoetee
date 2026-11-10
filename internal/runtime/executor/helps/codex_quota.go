@@ -4,8 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -35,7 +34,7 @@ func ParseCodexQuotaEventHeaders(payload []byte) http.Header {
 	if eventKind == codexQuotaEventOther {
 		return nil
 	}
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := gjson.ParseBytes(payload)
 	if eventKind == codexQuotaEventError {
 		return parseCodexQuotaHeadersObject(root.Get("headers"))
 	}
@@ -53,7 +52,7 @@ func ParseCodexQuotaEventHeaders(payload []byte) http.Header {
 	additional := firstCodexQuotaResult(root, "additional_rate_limits", "additionalRateLimits")
 	additionalCount := 0
 	if additional.Exists() && (additional.IsObject() || additional.IsArray()) {
-		additional.ForEach(func(key, value ojson.Result) bool {
+		additional.ForEach(func(key, value gjson.Result) bool {
 			if additionalCount >= maxCodexAdditionalRateLimits {
 				return false
 			}
@@ -78,7 +77,7 @@ func ParseCodexQuotaEventHeaders(payload []byte) http.Header {
 				// plain-text request log, so reject control characters here the
 				// same way the plan type is validated below.
 				if validCodexQuotaEventText(limitName) {
-					headers.Set(prefix+"Limit-Name", strings.Clone(limitName))
+					headers.Set(prefix+"Limit-Name", limitName)
 				}
 				hasQuotaData = true
 				additionalCount++
@@ -166,7 +165,7 @@ func codexQuotaEventKind(payload []byte) int {
 	return codexQuotaEventOther
 }
 
-func addCodexQuotaRateLimitHeaders(headers http.Header, prefix string, rateInfo ojson.Result) bool {
+func addCodexQuotaRateLimitHeaders(headers http.Header, prefix string, rateInfo gjson.Result) bool {
 	if !rateInfo.Exists() || !rateInfo.IsObject() {
 		return false
 	}
@@ -208,12 +207,12 @@ func addCodexQuotaRateLimitHeaders(headers http.Header, prefix string, rateInfo 
 	return changed
 }
 
-func parseCodexQuotaHeadersObject(headersNode ojson.Result) http.Header {
+func parseCodexQuotaHeadersObject(headersNode gjson.Result) http.Header {
 	if !headersNode.Exists() || !headersNode.IsObject() {
 		return nil
 	}
 	headers := make(http.Header)
-	headersNode.ForEach(func(key, value ojson.Result) bool {
+	headersNode.ForEach(func(key, value gjson.Result) bool {
 		name := http.CanonicalHeaderKey(strings.TrimSpace(key.String()))
 		if !isCodexQuotaHeaderName(name) {
 			return true
@@ -258,11 +257,11 @@ func isCodexQuotaHeaderName(name string) bool {
 	return false
 }
 
-func setCodexQuotaScalarHeader(headers http.Header, name string, object ojson.Result, paths ...string) bool {
+func setCodexQuotaScalarHeader(headers http.Header, name string, object gjson.Result, paths ...string) bool {
 	return setCodexQuotaScalarHeaderFromResult(headers, name, object, paths...)
 }
 
-func setCodexQuotaScalarHeaderFromResult(headers http.Header, name string, object ojson.Result, paths ...string) bool {
+func setCodexQuotaScalarHeaderFromResult(headers http.Header, name string, object gjson.Result, paths ...string) bool {
 	value := firstCodexQuotaResult(object, paths...)
 	if !value.Exists() {
 		return false
@@ -275,28 +274,28 @@ func setCodexQuotaScalarHeaderFromResult(headers http.Header, name string, objec
 	return true
 }
 
-func codexQuotaScalarValue(value ojson.Result) string {
+func codexQuotaScalarValue(value gjson.Result) string {
 	switch value.Type {
-	case ojson.String:
-		return strings.Clone(strings.TrimSpace(value.String()))
-	case ojson.Number, ojson.True, ojson.False:
-		return strings.Clone(strings.TrimSpace(value.Raw))
+	case gjson.String:
+		return strings.TrimSpace(value.String())
+	case gjson.Number, gjson.True, gjson.False:
+		return strings.TrimSpace(value.Raw)
 	default:
 		return ""
 	}
 }
 
-func firstCodexQuotaResult(object ojson.Result, paths ...string) ojson.Result {
+func firstCodexQuotaResult(object gjson.Result, paths ...string) gjson.Result {
 	for _, path := range paths {
 		value := object.Get(path)
-		if value.Exists() && value.Type != ojson.Null {
+		if value.Exists() && value.Type != gjson.Null {
 			return value
 		}
 	}
-	return ojson.Result{}
+	return gjson.Result{}
 }
 
-func firstCodexQuotaResultString(object ojson.Result, paths ...string) string {
+func firstCodexQuotaResultString(object gjson.Result, paths ...string) string {
 	for _, path := range paths {
 		value := firstCodexQuotaResult(object, path)
 		if raw := codexQuotaScalarValue(value); raw != "" {

@@ -56,13 +56,8 @@ type authConnectMsg struct {
 	err error
 }
 
-// NewApp creates the root TUI application model targeting localhost on the given port.
+// NewApp creates the root TUI application model.
 func NewApp(port int, secretKey string, hook *LogHook) App {
-	return NewAppWithBaseURL(fmt.Sprintf("http://127.0.0.1:%d", port), secretKey, hook)
-}
-
-// NewAppWithBaseURL creates the root TUI application model targeting the specified management base URL.
-func NewAppWithBaseURL(baseURL string, secretKey string, hook *LogHook) App {
 	standalone := hook != nil
 	authRequired := !standalone
 	ti := textinput.New()
@@ -72,7 +67,7 @@ func NewAppWithBaseURL(baseURL string, secretKey string, hook *LogHook) App {
 	ti.SetValue(strings.TrimSpace(secretKey))
 	ti.Focus()
 
-	client := NewClientWithBaseURL(baseURL, secretKey)
+	client := NewClient(port, secretKey)
 	app := App{
 		activeTab:     tabDashboard,
 		standalone:    standalone,
@@ -488,19 +483,13 @@ func (a App) connectWithPassword(password string) tea.Cmd {
 	}
 }
 
-// Run starts the TUI application targeting localhost on the given port.
+// Run starts the TUI application.
 // output specifies where bubbletea renders. If nil, defaults to os.Stdout.
 func Run(port int, secretKey string, hook *LogHook, output io.Writer) error {
-	return RunWithBaseURL(fmt.Sprintf("http://127.0.0.1:%d", port), secretKey, hook, output)
-}
-
-// RunWithBaseURL starts the TUI application targeting the specified management base URL.
-// output specifies where bubbletea renders. If nil, defaults to os.Stdout.
-func RunWithBaseURL(baseURL string, secretKey string, hook *LogHook, output io.Writer) error {
 	if output == nil {
 		output = os.Stdout
 	}
-	app := NewAppWithBaseURL(baseURL, secretKey, hook)
+	app := NewApp(port, secretKey, hook)
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithOutput(output))
 	_, err := p.Run()
 	return err

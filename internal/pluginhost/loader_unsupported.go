@@ -13,5 +13,3 @@ func (unsupportedLoader) Open(file pluginFile, host *Host) (pluginClient, error)
 func defaultPluginLoader() pluginLoader {
 	return unsupportedLoader{}
 }
-
-func cleanupStaleShadowPlugins(string, []pluginFile) {}

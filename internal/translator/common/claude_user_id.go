@@ -5,8 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/tidwall/gjson"
 )
 
 // DeriveClaudeUserID returns a stable value for the Claude request field
@@ -17,16 +16,16 @@ import (
 // the same user_id on every worker and every turn, while different
 // conversations get different values.
 func DeriveClaudeUserID(rawJSON []byte) string {
-	root := util.ParseGJSONBytesNoCopy(rawJSON)
+	root := gjson.ParseBytes(rawJSON)
 
-	if v := root.Get("metadata.user_id"); v.Exists() && v.Type == ojson.String {
+	if v := root.Get("metadata.user_id"); v.Exists() && v.Type == gjson.String {
 		if raw := v.String(); strings.TrimSpace(raw) != "" {
-			return strings.Clone(raw)
+			return raw
 		}
 	}
-	if v := root.Get("user"); v.Exists() && v.Type == ojson.String {
+	if v := root.Get("user"); v.Exists() && v.Type == gjson.String {
 		if raw := v.String(); strings.TrimSpace(raw) != "" {
-			return strings.Clone(raw)
+			return raw
 		}
 	}
 
@@ -56,7 +55,7 @@ func DeriveClaudeUserID(rawJSON []byte) string {
 		if sid := strings.TrimSpace(conversation.Get("id").String()); sid != "" {
 			seed.WriteString("conversation_id:")
 			seed.WriteString(sid)
-		} else if conversation.Type == ojson.String {
+		} else if conversation.Type == gjson.String {
 			if sid := strings.TrimSpace(conversation.String()); sid != "" {
 				seed.WriteString("conversation_id:")
 				seed.WriteString(sid)
@@ -109,10 +108,10 @@ func DeriveClaudeUserID(rawJSON []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func firstStableRequestContent(root ojson.Result) string {
+func firstStableRequestContent(root gjson.Result) string {
 	if messages := root.Get("messages"); messages.IsArray() {
 		var content string
-		messages.ForEach(func(_, message ojson.Result) bool {
+		messages.ForEach(func(_, message gjson.Result) bool {
 			role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 			if role == "user" {
 				content = extractTextContent(message.Get("content"))
@@ -128,13 +127,13 @@ func firstStableRequestContent(root ojson.Result) string {
 	}
 
 	if input := root.Get("input"); input.Exists() {
-		if input.Type == ojson.String {
+		if input.Type == gjson.String {
 			if text := strings.TrimSpace(input.String()); text != "" {
 				return text
 			}
 		} else if input.IsArray() {
 			var content string
-			input.ForEach(func(_, item ojson.Result) bool {
+			input.ForEach(func(_, item gjson.Result) bool {
 				if isResponsesUserItem(item) {
 					content = extractResponsesItemText(item.Get("content"))
 					if content != "" {
@@ -151,13 +150,13 @@ func firstStableRequestContent(root ojson.Result) string {
 
 	if contents := root.Get("contents"); contents.IsArray() {
 		var content string
-		contents.ForEach(func(_, contentItem ojson.Result) bool {
+		contents.ForEach(func(_, contentItem gjson.Result) bool {
 			role := strings.ToLower(strings.TrimSpace(contentItem.Get("role").String()))
 			// In Gemini API format, missing role defaults to "user"
 			if role == "" || role == "user" {
 				if parts := contentItem.Get("parts"); parts.IsArray() {
 					var texts []string
-					parts.ForEach(func(_, part ojson.Result) bool {
+					parts.ForEach(func(_, part gjson.Result) bool {
 						if IsGeminiThoughtPart(part) {
 							return true
 						}
@@ -184,15 +183,15 @@ func firstStableRequestContent(root ojson.Result) string {
 	return ""
 }
 
-func extractTextContent(content ojson.Result) string {
-	if content.Type == ojson.String {
+func extractTextContent(content gjson.Result) string {
+	if content.Type == gjson.String {
 		return strings.TrimSpace(content.String())
 	}
 	if !content.IsArray() {
 		return ""
 	}
 	var texts []string
-	content.ForEach(func(_, part ojson.Result) bool {
+	content.ForEach(func(_, part gjson.Result) bool {
 		if part.Get("type").String() == "text" {
 			if text := part.Get("text"); text.Exists() {
 				if val := strings.TrimSpace(text.String()); val != "" {
@@ -205,7 +204,7 @@ func extractTextContent(content ojson.Result) string {
 	return strings.TrimSpace(strings.Join(texts, "\n"))
 }
 
-func isResponsesUserItem(item ojson.Result) bool {
+func isResponsesUserItem(item gjson.Result) bool {
 	role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
 	if role == "user" {
 		return true
@@ -221,15 +220,15 @@ func isResponsesUserItem(item ojson.Result) bool {
 	return false
 }
 
-func extractResponsesItemText(content ojson.Result) string {
-	if content.Type == ojson.String {
+func extractResponsesItemText(content gjson.Result) string {
+	if content.Type == gjson.String {
 		return strings.TrimSpace(content.String())
 	}
 	if !content.IsArray() {
 		return ""
 	}
 	var texts []string
-	content.ForEach(func(_, part ojson.Result) bool {
+	content.ForEach(func(_, part gjson.Result) bool {
 		switch part.Get("type").String() {
 		case "input_text", "output_text", "text":
 			if text := part.Get("text"); text.Exists() {

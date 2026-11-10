@@ -1,8 +1,8 @@
 package signature
 
 import (
+	"encoding/base64"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"math"
 	"strings"
 	"unicode/utf8"
@@ -29,9 +29,6 @@ const (
 type GrokEncryptedContentInfo struct {
 	RawLen     int
 	DecodedLen int
-	// RouterSuffix is the dot-delimited suffix a router such as OpenRouter
-	// appends after the native Grok ciphertext; empty for native values.
-	RouterSuffix string
 }
 
 // InspectGrokEncryptedContent validates the transport shape of xAI/Grok
@@ -59,20 +56,11 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 	if strings.Contains(sig, "=") {
 		return nil, fmt.Errorf("invalid Grok encrypted_content: expected unpadded standard base64")
 	}
+	if index, r, ok := firstInvalidGrokEncryptedContentChar(sig); ok {
+		return nil, fmt.Errorf("invalid Grok encrypted_content: contains non-base64 character U+%04X at byte %d", r, index)
+	}
 	if _, _, ok := SplitSignatureProviderPrefix(sig); ok {
 		return nil, fmt.Errorf("invalid Grok encrypted_content: carries another provider's cache prefix")
-	}
-	native := sig
-	routerSuffix := ""
-	if head, tail, ok := strings.Cut(sig, "."); ok {
-		if !isValidMetaRouterSuffix(tail) {
-			return nil, fmt.Errorf("invalid Grok encrypted_content: router suffix must be 1-%d alphanumeric characters", maxMetaRouterSuffixLen)
-		}
-		native = head
-		routerSuffix = tail
-	}
-	if index, r, ok := firstInvalidGrokEncryptedContentChar(native); ok {
-		return nil, fmt.Errorf("invalid Grok encrypted_content: contains non-base64 character U+%04X at byte %d", r, index)
 	}
 	// Foreign-envelope rejection only has to run for the narrow set of base64
 	// first characters a self-describing envelope can produce. Native xAI
@@ -82,20 +70,17 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 	// particular is high-entropy standard base64 that drops its padding whenever
 	// the decoded length is a multiple of 3, so the padding gate above does not
 	// exclude it on its own.
-	if maybeSelfDescribingSignatureEnvelope(native) {
-		if strings.HasPrefix(native, "gAAAA") {
+	if maybeSelfDescribingSignatureEnvelope(sig) {
+		if strings.HasPrefix(sig, "gAAAA") {
 			return nil, fmt.Errorf("Grok encrypted_content looks like GPT/Codex reasoning signature")
 		}
-		if IsValidMetaReasoningSignature(native) {
-			return nil, fmt.Errorf("Grok encrypted_content looks like Meta reasoning signature")
-		}
-		if IsValidClaudeThinkingSignature(native, ClaudeSignatureValidationOptions{Strict: true}) {
+		if IsValidClaudeThinkingSignature(sig, ClaudeSignatureValidationOptions{Strict: true}) {
 			return nil, fmt.Errorf("Grok encrypted_content looks like Claude thinking signature")
 		}
-		if IsValidClaudeCAISSignature(native) {
+		if IsValidClaudeCAISSignature(sig) {
 			return nil, fmt.Errorf("Grok encrypted_content looks like Claude CAIS thinking signature")
 		}
-		if _, err := InspectGeminiThoughtSignature(native, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil {
+		if _, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil {
 			return nil, fmt.Errorf("Grok encrypted_content looks like Gemini thoughtSignature")
 		}
 	}
@@ -105,16 +90,13 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 	// length tracks reasoning volume continuously at 1-byte granularity. Neither
 	// observed Kimi length appears anywhere in 1027 catalogued signatures or 215
 	// native Grok samples, so rejecting them here costs no real Grok traffic.
-	if IsValidKimiThinkingSignature(native) {
+	if IsValidKimiThinkingSignature(sig) {
 		return nil, fmt.Errorf("Grok encrypted_content has a Kimi thinking signature length")
 	}
 
-	decoded, err := decodeGrokEncryptedContent(native)
+	decoded, err := decodeGrokEncryptedContent(sig)
 	if err != nil {
 		return nil, err
-	}
-	if strings.HasPrefix(string(decoded), "cpa-codex-gemini-carrier-v1:") {
-		return nil, fmt.Errorf("invalid Grok encrypted_content: carries Gemini Codex thoughtSignature carrier")
 	}
 	if len(decoded) < MinGrokEncryptedContentDecodedLen {
 		return nil, fmt.Errorf("invalid Grok encrypted_content: decoded payload too short (%d bytes)", len(decoded))
@@ -123,9 +105,8 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 		return nil, fmt.Errorf("invalid Grok encrypted_content: decoded payload entropy ratio %.3f below %.3f", entropyRatio, MinGrokEncryptedContentEntropyRatio)
 	}
 	return &GrokEncryptedContentInfo{
-		RawLen:       len(sig),
-		DecodedLen:   len(decoded),
-		RouterSuffix: routerSuffix,
+		RawLen:     len(sig),
+		DecodedLen: len(decoded),
 	}, nil
 }
 

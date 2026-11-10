@@ -7,10 +7,11 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func isAntigravityVertexSearchRedirect(rawURL string) bool {
@@ -66,30 +67,18 @@ func ResolveAntigravityGroundingURLs(ctx context.Context, cfg *config.Config, au
 	if len(payload) == 0 {
 		return payload
 	}
-	doc := ojson.NewDoc(payload)
-	if !ResolveAntigravityGroundingURLsDoc(ctx, cfg, auth, doc) {
-		return payload
-	}
-	return doc.Bytes()
-}
-
-// ResolveAntigravityGroundingURLsDoc replaces Vertex Search redirect URLs in grounding chunks in place on doc.
-func ResolveAntigravityGroundingURLsDoc(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, doc *ojson.Doc) bool {
-	if doc == nil || doc.Len() == 0 {
-		return false
-	}
 
 	basePath := "response.candidates.0.groundingMetadata.groundingChunks"
-	chunks := doc.Get(basePath)
+	chunks := gjson.GetBytes(payload, basePath)
 	if !chunks.IsArray() {
 		basePath = "candidates.0.groundingMetadata.groundingChunks"
-		chunks = doc.Get(basePath)
+		chunks = gjson.GetBytes(payload, basePath)
 	}
 	if !chunks.IsArray() {
-		return false
+		return payload
 	}
 
-	modified := false
+	output := payload
 	resolved := map[string]string{}
 	for i, chunk := range chunks.Array() {
 		uri := strings.TrimSpace(chunk.Get("web.uri").String())
@@ -104,11 +93,12 @@ func ResolveAntigravityGroundingURLsDoc(ctx context.Context, cfg *config.Config,
 		if resolvedURI == uri {
 			continue
 		}
-		if errSet := doc.Set(fmt.Sprintf("%s.%d.web.uri", basePath, i), resolvedURI); errSet != nil {
+		updated, errSet := sjson.SetBytes(output, fmt.Sprintf("%s.%d.web.uri", basePath, i), resolvedURI)
+		if errSet != nil {
 			log.WithError(errSet).Debug("antigravity grounding url: set resolved url failed")
 			continue
 		}
-		modified = true
+		output = updated
 	}
-	return modified
+	return output
 }

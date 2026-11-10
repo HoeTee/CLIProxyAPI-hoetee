@@ -1,13 +1,13 @@
 package responses
 
 import (
+	"encoding/base64"
 	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -76,7 +76,7 @@ func compatibleGeminiResponsesCarrierSignature(rawSignature, targetKind string) 
 	return normalized, true
 }
 
-func geminiResponsesCarrierSemanticTarget(item ojson.Result) string {
+func geminiResponsesCarrierSemanticTarget(item gjson.Result) string {
 	switch item.Get("type").String() {
 	case "function_call", "custom_tool_call":
 		return geminiResponsesCarrierFunction
@@ -91,7 +91,7 @@ func geminiResponsesCarrierSemanticTarget(item ojson.Result) string {
 	return ""
 }
 
-func geminiResponsesCarrierMatchesAdjacent(items []ojson.Result, index int, direction, targetKind string) bool {
+func geminiResponsesCarrierMatchesAdjacent(items []gjson.Result, index int, direction, targetKind string) bool {
 	step := 1
 	if direction == geminiResponsesCarrierPrevious {
 		step = -1
@@ -107,7 +107,7 @@ func geminiResponsesCarrierMatchesAdjacent(items []ojson.Result, index int, dire
 	return false
 }
 
-func hasInternalCarrierFields(item ojson.Result) bool {
+func hasInternalCarrierFields(item gjson.Result) bool {
 	return item.Get(geminiResponsesCarrierDirectionField).Exists() ||
 		item.Get(geminiResponsesCarrierTargetField).Exists() ||
 		item.Get(geminiResponsesCarrierSignatureField).Exists() ||
@@ -130,8 +130,8 @@ func stripGeminiResponsesCarrierMetadata(rawJSON string) ([]byte, bool) {
 	return stripped, true
 }
 
-func normalizeGeminiResponsesCarriers(items []ojson.Result) ([]ojson.Result, bool) {
-	normalized := make([]ojson.Result, 0, len(items))
+func normalizeGeminiResponsesCarriers(items []gjson.Result) ([]gjson.Result, bool) {
+	normalized := make([]gjson.Result, 0, len(items))
 	hasValidCarrier := false
 	for itemIndex, originalItem := range items {
 		item := originalItem
@@ -140,7 +140,7 @@ func normalizeGeminiResponsesCarriers(items []ojson.Result) ([]ojson.Result, boo
 			stripped, ok := stripGeminiResponsesCarrierMetadata(originalItem.Raw)
 			if ok {
 				itemJSON = stripped
-				item = util.ParseGJSONBytesNoCopy(itemJSON)
+				item = gjson.ParseBytes(itemJSON)
 			}
 		}
 		if item.Get("type").String() != "reasoning" {
@@ -173,28 +173,27 @@ func normalizeGeminiResponsesCarriers(items []ojson.Result) ([]ojson.Result, boo
 			if strings.TrimSpace(item.Get("summary.0.text").String()) == "" {
 				continue
 			}
-			itemJSON, _ = ojson.DeleteBytes(itemJSON, "encrypted_content")
-			normalized = append(normalized, util.ParseGJSONBytesNoCopy(itemJSON))
+			itemJSON, _ = sjson.DeleteBytes(itemJSON, "encrypted_content")
+			normalized = append(normalized, gjson.ParseBytes(itemJSON))
 			continue
 		}
 		hasValidCarrier = true
-		itemDoc := ojson.NewDoc(itemJSON)
-		_ = itemDoc.Set("encrypted_content", signature)
-		_ = itemDoc.Set(geminiResponsesCarrierDirectionField, direction)
-		_ = itemDoc.Set(geminiResponsesCarrierTargetField, targetKind)
-		normalized = append(normalized, util.ParseGJSONBytesNoCopy(itemDoc.Bytes()))
+		itemJSON, _ = sjson.SetBytes(itemJSON, "encrypted_content", signature)
+		itemJSON, _ = sjson.SetBytes(itemJSON, geminiResponsesCarrierDirectionField, direction)
+		itemJSON, _ = sjson.SetBytes(itemJSON, geminiResponsesCarrierTargetField, targetKind)
+		normalized = append(normalized, gjson.ParseBytes(itemJSON))
 	}
 	return normalized, hasValidCarrier
 }
 
-func geminiResponsesCarrierDirection(item ojson.Result) string {
+func geminiResponsesCarrierDirection(item gjson.Result) string {
 	return item.Get(geminiResponsesCarrierDirectionField).String()
 }
 
-func geminiResponsesCarrierTarget(item ojson.Result) string {
+func geminiResponsesCarrierTarget(item gjson.Result) string {
 	return item.Get(geminiResponsesCarrierTargetField).String()
 }
 
-func isOpenAIResponsesDetachedCarrier(item ojson.Result) bool {
+func isOpenAIResponsesDetachedCarrier(item gjson.Result) bool {
 	return item.Get("type").String() == "reasoning" && strings.TrimSpace(item.Get("encrypted_content").String()) != "" && strings.TrimSpace(item.Get("summary.0.text").String()) == ""
 }

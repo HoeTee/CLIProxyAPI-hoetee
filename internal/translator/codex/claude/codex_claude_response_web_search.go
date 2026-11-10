@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
-func appendCodexWebSearchServerToolUse(output []byte, params *ConvertCodexResponseToClaudeParams, root, item ojson.Result) []byte {
+func appendCodexWebSearchServerToolUse(output []byte, params *ConvertCodexResponseToClaudeParams, root, item gjson.Result) []byte {
 	toolUseID := codexWebSearchToolUseID(params, root, item)
 	if toolUseID == "" {
 		return output
@@ -29,23 +30,23 @@ func appendCodexWebSearchServerToolUse(output []byte, params *ConvertCodexRespon
 	if !alreadyStarted {
 		output = append(output, stopCodexTextBlock(params)...)
 		output = append(output, finalizeCodexThinkingBlock(params)...)
-		templateDoc := ojson.NewDocString(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`)
-		_ = templateDoc.Set("index", params.BlockIndex)
-		_ = templateDoc.Set("content_block.id", toolUseID)
-		output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", templateDoc.Bytes(), 2)
+		template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`)
+		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+		template, _ = sjson.SetBytes(template, "content_block.id", toolUseID)
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 	}
 
 	if query != "" {
 		partialJSON, _ := json.Marshal(map[string]string{"query": query})
-		deltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
-		_ = deltaDoc.Set("index", params.BlockIndex)
-		_ = deltaDoc.Set("delta.partial_json", string(partialJSON))
-		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", deltaDoc.Bytes(), 2)
+		delta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+		delta, _ = sjson.SetBytes(delta, "index", params.BlockIndex)
+		delta, _ = sjson.SetBytes(delta, "delta.partial_json", string(partialJSON))
+		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", delta, 2)
 	}
 
 	if !alreadyStarted {
 		stop := []byte(`{"type":"content_block_stop","index":0}`)
-		stop, _ = ojson.SetBytes(stop, "index", params.BlockIndex)
+		stop, _ = sjson.SetBytes(stop, "index", params.BlockIndex)
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", stop, 2)
 		params.WebSearchToolUseIDs[toolUseID] = struct{}{}
 		params.BlockIndex++
@@ -53,7 +54,7 @@ func appendCodexWebSearchServerToolUse(output []byte, params *ConvertCodexRespon
 	return output
 }
 
-func appendCodexWebSearchToolResult(output []byte, params *ConvertCodexResponseToClaudeParams, root, item ojson.Result) []byte {
+func appendCodexWebSearchToolResult(output []byte, params *ConvertCodexResponseToClaudeParams, root, item gjson.Result) []byte {
 	toolUseID := codexWebSearchToolUseID(params, root, item)
 	if toolUseID == "" {
 		return output
@@ -69,16 +70,16 @@ func appendCodexWebSearchToolResult(output []byte, params *ConvertCodexResponseT
 		return output
 	}
 
-	templateDoc := ojson.NewDocString(`{"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"","content":[]}}`)
-	_ = templateDoc.Set("index", params.BlockIndex)
-	_ = templateDoc.Set("content_block.tool_use_id", toolUseID)
+	template := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"","content":[]}}`)
+	template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+	template, _ = sjson.SetBytes(template, "content_block.tool_use_id", toolUseID)
 	if content := codexWebSearchResultContent(root, item); len(content) > 0 {
-		_ = templateDoc.SetRawBytes("content_block.content", content)
+		template, _ = sjson.SetRawBytes(template, "content_block.content", content)
 	}
-	output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", templateDoc.Bytes(), 2)
+	output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 
 	stop := []byte(`{"type":"content_block_stop","index":0}`)
-	stop, _ = ojson.SetBytes(stop, "index", params.BlockIndex)
+	stop, _ = sjson.SetBytes(stop, "index", params.BlockIndex)
 	output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", stop, 2)
 	params.WebSearchToolResultIDs[toolUseID] = struct{}{}
 	params.BlockIndex++
@@ -88,13 +89,13 @@ func appendCodexWebSearchToolResult(output []byte, params *ConvertCodexResponseT
 	return output
 }
 
-func codexWebSearchToolUseID(params *ConvertCodexResponseToClaudeParams, root, item ojson.Result) string {
+func codexWebSearchToolUseID(params *ConvertCodexResponseToClaudeParams, root, item gjson.Result) string {
 	for _, path := range []string{"id", "output_item_id", "call_id"} {
 		if value := strings.TrimSpace(item.Get(path).String()); value != "" {
-			return strings.Clone(value)
+			return value
 		}
 		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
-			return strings.Clone(value)
+			return value
 		}
 	}
 	if params.LastWebSearchToolUseID != "" {
@@ -102,10 +103,10 @@ func codexWebSearchToolUseID(params *ConvertCodexResponseToClaudeParams, root, i
 	}
 	for _, path := range []string{"item_id"} {
 		if value := strings.TrimSpace(item.Get(path).String()); value != "" {
-			return strings.Clone(value)
+			return value
 		}
 		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
-			return strings.Clone(value)
+			return value
 		}
 	}
 	id := fmt.Sprintf("web_search_%d", params.BlockIndex)
@@ -113,7 +114,7 @@ func codexWebSearchToolUseID(params *ConvertCodexResponseToClaudeParams, root, i
 	return id
 }
 
-func codexWebSearchQuery(root, item ojson.Result) string {
+func codexWebSearchQuery(root, item gjson.Result) string {
 	for _, path := range []string{"action.query", "query", "input.query"} {
 		if value := strings.TrimSpace(item.Get(path).String()); value != "" {
 			return value
@@ -125,36 +126,28 @@ func codexWebSearchQuery(root, item ojson.Result) string {
 	return ""
 }
 
-func codexWebSearchResultContent(root, item ojson.Result) []byte {
-	var results ojson.Result
-	for _, candidate := range []ojson.Result{
-		item.Get("results"),
-		root.Get("results"),
-		item.Get("action.sources"),
-		root.Get("action.sources"),
-	} {
-		if candidate.IsArray() {
-			results = candidate
-			break
-		}
+func codexWebSearchResultContent(root, item gjson.Result) []byte {
+	results := item.Get("results")
+	if !results.IsArray() {
+		results = root.Get("results")
 	}
 	if !results.IsArray() {
 		return nil
 	}
 	var resultBlocks [][]byte
-	results.ForEach(func(_, result ojson.Result) bool {
+	results.ForEach(func(_, result gjson.Result) bool {
 		url := strings.TrimSpace(result.Get("url").String())
 		if url == "" {
 			return true
 		}
-		blockDoc := ojson.NewDocString(`{"type":"web_search_result","title":"","url":"","page_age":null}`)
-		_ = blockDoc.Set("url", url)
+		block := []byte(`{"type":"web_search_result","title":"","url":"","page_age":null}`)
+		block, _ = sjson.SetBytes(block, "url", url)
 		title := strings.TrimSpace(result.Get("title").String())
 		if title == "" {
 			title = url
 		}
-		_ = blockDoc.Set("title", title)
-		resultBlocks = append(resultBlocks, blockDoc.Bytes())
+		block, _ = sjson.SetBytes(block, "title", title)
+		resultBlocks = append(resultBlocks, block)
 		return true
 	})
 	if len(resultBlocks) == 0 {
@@ -163,7 +156,7 @@ func codexWebSearchResultContent(root, item ojson.Result) []byte {
 	return translatorcommon.JoinRawArray(resultBlocks)
 }
 
-func appendCodexWebSearchNonStreamBlocks(contentBlocks [][]byte, item ojson.Result, seen map[string]struct{}) [][]byte {
+func appendCodexWebSearchNonStreamBlocks(contentBlocks [][]byte, item gjson.Result, seen map[string]struct{}) [][]byte {
 	id := strings.TrimSpace(item.Get("id").String())
 	if id == "" {
 		return contentBlocks
@@ -174,39 +167,35 @@ func appendCodexWebSearchNonStreamBlocks(contentBlocks [][]byte, item ojson.Resu
 	if _, ok := seen[id]; ok {
 		return contentBlocks
 	}
-	emptyRoot := ojson.Result{}
+	emptyRoot := gjson.Result{}
 	query := codexWebSearchQuery(emptyRoot, item)
 	resultContent := codexWebSearchResultContent(emptyRoot, item)
 	if query == "" && len(resultContent) == 0 {
 		return contentBlocks
 	}
 
-	useBlockDoc := ojson.NewDocString(`{"type":"server_tool_use","id":"","name":"web_search","input":{}}`)
-	_ = useBlockDoc.Set("id", id)
+	useBlock := []byte(`{"type":"server_tool_use","id":"","name":"web_search","input":{}}`)
+	useBlock, _ = sjson.SetBytes(useBlock, "id", id)
 	if query != "" {
 		input, _ := json.Marshal(map[string]string{"query": query})
-		_ = useBlockDoc.SetRawBytes("input", input)
+		useBlock, _ = sjson.SetRawBytes(useBlock, "input", input)
 	}
-	contentBlocks = append(contentBlocks, useBlockDoc.Bytes())
+	contentBlocks = append(contentBlocks, useBlock)
 
-	resultBlockDoc := ojson.NewDocString(`{"type":"web_search_tool_result","tool_use_id":"","content":[]}`)
-	_ = resultBlockDoc.Set("tool_use_id", id)
+	resultBlock := []byte(`{"type":"web_search_tool_result","tool_use_id":"","content":[]}`)
+	resultBlock, _ = sjson.SetBytes(resultBlock, "tool_use_id", id)
 	if len(resultContent) > 0 {
-		_ = resultBlockDoc.SetRawBytes("content", resultContent)
+		resultBlock, _ = sjson.SetRawBytes(resultBlock, "content", resultContent)
 	}
-	contentBlocks = append(contentBlocks, resultBlockDoc.Bytes())
+	contentBlocks = append(contentBlocks, resultBlock)
 	seen[id] = struct{}{}
 	return contentBlocks
 }
 
-func appendCodexWebSearchNonStreamContent(out []byte, item ojson.Result, seen map[string]struct{}) []byte {
+func appendCodexWebSearchNonStreamContent(out []byte, item gjson.Result, seen map[string]struct{}) []byte {
 	blocks := appendCodexWebSearchNonStreamBlocks(nil, item, seen)
-	if len(blocks) == 0 {
-		return out
-	}
-	outDoc := ojson.NewDoc(out)
 	for _, block := range blocks {
-		_ = outDoc.SetRawBytes("content.-1", block)
+		out, _ = sjson.SetRawBytes(out, "content.-1", block)
 	}
-	return outDoc.Bytes()
+	return out
 }

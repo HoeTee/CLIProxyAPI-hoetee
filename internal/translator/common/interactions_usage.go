@@ -1,8 +1,8 @@
 package common
 
-import "github.com/MoeForge/moego/ojson"
+import "github.com/tidwall/gjson"
 
-func InteractionsUsage(root ojson.Result) ojson.Result {
+func InteractionsUsage(root gjson.Result) gjson.Result {
 	for _, path := range []string{
 		"interaction.usage",
 		"usage",
@@ -15,5 +15,5 @@ func InteractionsUsage(root ojson.Result) ojson.Result {
 			return value
 		}
 	}
-	return ojson.Result{}
+	return gjson.Result{}
 }

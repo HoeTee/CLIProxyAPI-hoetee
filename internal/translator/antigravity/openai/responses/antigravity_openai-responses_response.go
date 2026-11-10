@@ -3,12 +3,12 @@ package responses
 import (
 	"context"
 
-	"github.com/MoeForge/moego/ojson"
-	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
+	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
+	"github.com/tidwall/gjson"
 )
 
 func ConvertAntigravityResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-	responseResult := ojson.GetBytesNoCopy(rawJSON, "response")
+	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		rawJSON = []byte(responseResult.Raw)
 	}
@@ -16,17 +16,17 @@ func ConvertAntigravityResponseToOpenAIResponses(ctx context.Context, modelName 
 }
 
 func ConvertAntigravityResponseToOpenAIResponsesNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
-	responseResult := ojson.GetBytesNoCopy(rawJSON, "response")
+	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		rawJSON = []byte(responseResult.Raw)
 	}
 
-	requestResult := ojson.GetBytesNoCopy(originalRequestRawJSON, "request")
+	requestResult := gjson.GetBytes(originalRequestRawJSON, "request")
 	if requestResult.Exists() {
 		originalRequestRawJSON = []byte(requestResult.Raw)
 	}
 
-	requestResult = ojson.GetBytesNoCopy(requestRawJSON, "request")
+	requestResult = gjson.GetBytes(requestRawJSON, "request")
 	if requestResult.Exists() {
 		requestRawJSON = []byte(requestResult.Raw)
 	}

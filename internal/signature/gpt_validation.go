@@ -1,8 +1,8 @@
 package signature
 
 import (
+	"encoding/base64"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"unicode/utf8"
 )
@@ -12,9 +12,6 @@ const MaxGPTReasoningSignatureLen = 32 * 1024 * 1024
 type GPTReasoningSignatureInfo struct {
 	DecodedLen    int
 	CiphertextLen int
-	// RouterSuffix is the dot-delimited suffix a router such as OpenRouter
-	// appends after the native Fernet envelope; empty for native values.
-	RouterSuffix string
 }
 
 func IsValidGPTReasoningSignature(rawSignature string) bool {
@@ -41,20 +38,11 @@ func InspectGPTReasoningSignature(rawSignature string) (*GPTReasoningSignatureIn
 	if !strings.HasPrefix(sig, "gAAAA") {
 		return nil, fmt.Errorf("invalid GPT reasoning signature: expected gAAAA prefix")
 	}
-	native := sig
-	routerSuffix := ""
-	if head, tail, ok := strings.Cut(sig, "."); ok {
-		if !isValidMetaRouterSuffix(tail) {
-			return nil, fmt.Errorf("invalid GPT reasoning signature: router suffix must be 1-%d alphanumeric characters", maxMetaRouterSuffixLen)
-		}
-		native = head
-		routerSuffix = tail
-	}
-	if index, r, ok := firstInvalidGPTReasoningSignatureChar(native); ok {
+	if index, r, ok := firstInvalidGPTReasoningSignatureChar(sig); ok {
 		return nil, fmt.Errorf("invalid GPT reasoning signature: contains non-base64url character U+%04X at byte %d", r, index)
 	}
 
-	decoded, err := decodeGPTReasoningSignature(native)
+	decoded, err := decodeGPTReasoningSignature(sig)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +61,6 @@ func InspectGPTReasoningSignature(rawSignature string) (*GPTReasoningSignatureIn
 	return &GPTReasoningSignatureInfo{
 		DecodedLen:    len(decoded),
 		CiphertextLen: ciphertextLen,
-		RouterSuffix:  routerSuffix,
 	}, nil
 }
 

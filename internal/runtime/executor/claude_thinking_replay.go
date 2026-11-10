@@ -6,14 +6,14 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 // claudeThinkingReplayScope reuses the bounded replay state shape shared with Kimi.
@@ -90,24 +90,18 @@ func prepareClaudeThinkingReplayRequest(ctx context.Context, auth *cliproxyauth.
 }
 
 func restoreClaudeThinkingReplayContents(body []byte, cachedContents [][]byte) ([]byte, bool) {
-	if len(cachedContents) == 0 {
-		return body, false
-	}
-	doc := ojson.NewDoc(body)
+	updated := body
 	restored := false
 	for _, cachedContent := range cachedContents {
-		if restoreKimiThinkingReplayContentDoc(doc, cachedContent) {
-			restored = true
-		}
+		var restoredTurn bool
+		updated, restoredTurn = restoreKimiThinkingReplayContent(updated, cachedContent)
+		restored = restored || restoredTurn
 	}
-	if !restored {
-		return body, false
-	}
-	return doc.Bytes(), true
+	return updated, restored
 }
 
 func cacheClaudeThinkingReplayResponse(ctx context.Context, scope claudeThinkingReplayScope, response []byte) {
-	content := ojson.GetBytesNoCopy(response, "content")
+	content := gjson.GetBytes(response, "content")
 	if content.IsArray() {
 		cacheClaudeThinkingReplayContent(ctx, scope, []byte(content.Raw))
 		return

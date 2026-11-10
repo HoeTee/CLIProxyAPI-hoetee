@@ -6,23 +6,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, allowIncrementalInputWithPreviousResponseID bool) bool {
 	if allowIncrementalInputWithPreviousResponseID {
 		return false
 	}
-	var fieldsBuf [2]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], rawJSON, "type", "generate")
-	if strings.TrimSpace(fields[0].String()) != wsRequestTypeCreate {
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) != wsRequestTypeCreate {
 		return false
 	}
-	generateResult := fields[1]
+	generateResult := gjson.GetBytes(rawJSON, "generate")
 	return generateResult.Exists() && !generateResult.Bool()
 }
 
@@ -56,20 +55,18 @@ func writeResponsesWebsocketSyntheticPrewarm(
 			return "", errWrite
 		}
 	}
-	return strings.Clone(ojson.GetBytesNoCopy(payloads[0], "response.id").String()), nil
+	return gjson.GetBytes(payloads[0], "response.id").String(), nil
 }
 
 // A synthetic warm-up acknowledges input that never reached the upstream.
 // Materialize that input before compacted-history detection can mistake the
 // client's remaining delta for a complete replacement transcript.
 func normalizeResponsesWebsocketPrewarmFollowup(rawJSON, warmupRequest []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
-	var fieldsBuf [2]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], rawJSON, "type", "input")
-	requestType := strings.TrimSpace(fields[0].String())
+	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
 		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("unsupported websocket request type: %s", requestType)}
 	}
-	input := fields[1]
+	input := gjson.GetBytes(rawJSON, "input")
 	if !input.IsArray() {
 		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: fmt.Errorf("websocket request requires array field: input")}
 	}
@@ -77,47 +74,55 @@ func normalizeResponsesWebsocketPrewarmFollowup(rawJSON, warmupRequest []byte) (
 	if errMerge != nil {
 		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errMerge}
 	}
-	doc := ojson.NewDoc(rawJSON)
-	normalizeResponseTranscriptReplacementDoc(doc, warmupRequest)
-	if errSet := doc.SetRawBytes("input", merged); errSet != nil {
+	normalized := normalizeResponseTranscriptReplacement(rawJSON, warmupRequest)
+	var errSet error
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", merged)
+	if errSet != nil {
 		return nil, warmupRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errSet}
 	}
-	normalized := doc.Bytes()
 	return normalized, normalized, nil
 }
 
 func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, error) {
 	responseID := "resp_prewarm_" + uuid.NewString()
 	createdAt := time.Now().Unix()
-	modelName := strings.TrimSpace(ojson.GetBytesNoCopy(requestJSON, "model").String())
+	modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String())
 
-	createdDoc := ojson.NewDoc([]byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`))
-	if errSet := createdDoc.Set("response.id", responseID); errSet != nil {
+	createdPayload := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
+	var errSet error
+	createdPayload, errSet = sjson.SetBytes(createdPayload, "response.id", responseID)
+	if errSet != nil {
 		return nil, errSet
 	}
-	if errSet := createdDoc.Set("response.created_at", createdAt); errSet != nil {
+	createdPayload, errSet = sjson.SetBytes(createdPayload, "response.created_at", createdAt)
+	if errSet != nil {
 		return nil, errSet
 	}
 	if modelName != "" {
-		if errSet := createdDoc.Set("response.model", modelName); errSet != nil {
+		createdPayload, errSet = sjson.SetBytes(createdPayload, "response.model", modelName)
+		if errSet != nil {
+			return nil, errSet
+		}
+
+	}
+
+	completedPayload := []byte(`{"type":"response.completed","sequence_number":1,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`)
+	completedPayload, errSet = sjson.SetBytes(completedPayload, "response.id", responseID)
+	if errSet != nil {
+		return nil, errSet
+	}
+	completedPayload, errSet = sjson.SetBytes(completedPayload, "response.created_at", createdAt)
+	if errSet != nil {
+		return nil, errSet
+	}
+	if modelName != "" {
+		completedPayload, errSet = sjson.SetBytes(completedPayload, "response.model", modelName)
+		if errSet != nil {
 			return nil, errSet
 		}
 	}
 
-	completedDoc := ojson.NewDoc([]byte(`{"type":"response.completed","sequence_number":1,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`))
-	if errSet := completedDoc.Set("response.id", responseID); errSet != nil {
-		return nil, errSet
-	}
-	if errSet := completedDoc.Set("response.created_at", createdAt); errSet != nil {
-		return nil, errSet
-	}
-	if modelName != "" {
-		if errSet := completedDoc.Set("response.model", modelName); errSet != nil {
-			return nil, errSet
-		}
-	}
-
-	return [][]byte{createdDoc.Bytes(), completedDoc.Bytes()}, nil
+	return [][]byte{createdPayload, completedPayload}, nil
 }
 
 // inputContainsFullTranscript returns true when the input array carries compact
@@ -128,7 +133,7 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 //
 // Assistant messages alone are not enough to classify the payload as a replay:
 // incremental websocket requests may legitimately append assistant items.
-func inputContainsFullTranscript(input ojson.Result) bool {
+func inputContainsFullTranscript(input gjson.Result) bool {
 	if !input.IsArray() {
 		return false
 	}
@@ -141,7 +146,7 @@ func inputContainsFullTranscript(input ojson.Result) bool {
 	return false
 }
 
-func inputWithoutCompactionItems(input ojson.Result) string {
+func inputWithoutCompactionItems(input gjson.Result) string {
 	if !input.IsArray() {
 		return normalizeJSONArrayRaw([]byte(input.Raw))
 	}
@@ -161,8 +166,8 @@ func normalizeJSONArrayRaw(raw []byte) string {
 	if trimmed == "" {
 		return "[]"
 	}
-	result := ojson.Parse(trimmed)
-	if result.Type == ojson.JSON && result.IsArray() {
+	result := gjson.Parse(trimmed)
+	if result.Type == gjson.JSON && result.IsArray() {
 		return trimmed
 	}
 	return "[]"

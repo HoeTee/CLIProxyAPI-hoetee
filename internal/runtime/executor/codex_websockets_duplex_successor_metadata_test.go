@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	auth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	core "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	translator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 // Explicit creates can arrive before pending notifications. They must not
@@ -53,11 +53,11 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 					write(fmt.Sprintf(`{"type":%q,"response":{"id":%q,"previous_response_id":%q,"prompt_cache_key":%q,"output":[],"incomplete_details":{"reason":"steered"}}}`, kind, id, parent, key))
 				}
 				first := read()
-				firstKey := ojson.GetBytes(first, "prompt_cache_key").String()
+				firstKey := gjson.GetBytes(first, "prompt_cache_key").String()
 				response("response.created", "first", firstKey)
 				if scenario == "create_before_steer" {
 					middle := read()
-					if ojson.GetBytes(middle, "type").String() != "response.create" {
+					if gjson.GetBytes(middle, "type").String() != "response.create" {
 						t.Errorf("expected middle create: %s", middle)
 						return
 					}
@@ -67,18 +67,18 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 						t.Error("steering was not queued")
 						return
 					}
-					middleKey := ojson.GetBytes(middle, "prompt_cache_key").String()
+					middleKey := gjson.GetBytes(middle, "prompt_cache_key").String()
 					response("response.completed", "first", firstKey)
 					response("response.created", "middle", middleKey)
 					response("response.completed", "middle", middleKey)
 				}
-				if p := read(); ojson.GetBytes(p, "type").String() != "response.steer" {
+				if p := read(); gjson.GetBytes(p, "type").String() != "response.steer" {
 					t.Errorf("expected steering: %s", p)
 					return
 				}
 				write(`{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"first"}}`)
 				if scenario == "multiple_steers" {
-					if p := read(); ojson.GetBytes(p, "type").String() != "response.steer" {
+					if p := read(); gjson.GetBytes(p, "type").String() != "response.steer" {
 						t.Errorf("expected second steering: %s", p)
 						return
 					}
@@ -108,11 +108,11 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 					response("response.completed", "automatic", firstKey)
 				}
 				next := read()
-				if ojson.GetBytes(next, "type").String() != "response.create" {
+				if gjson.GetBytes(next, "type").String() != "response.create" {
 					t.Errorf("expected explicit create: %s", next)
 					return
 				}
-				nextKey := ojson.GetBytes(next, "prompt_cache_key").String()
+				nextKey := gjson.GetBytes(next, "prompt_cache_key").String()
 				response("response.created", "explicit", nextKey)
 				response("response.completed", "explicit", nextKey)
 				_, _, _ = c.ReadMessage()
@@ -125,6 +125,8 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Codex.ResponseSteering = true
 			cfg.CodexResponseSteering = true
+			cfg.Codex.IdentityConfuse = true
+			cfg.Routing.SessionAffinity = true
 			executor := NewCodexWebsocketsExecutor(cfg)
 			executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 			credential := &auth.Auth{ID: t.Name(), Provider: "codex", Attributes: map[string]string{"api_key": "test", "base_url": upstream.URL, "websockets": "true"}}
@@ -140,8 +142,8 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 				if chunk.Err != nil {
 					t.Fatal(chunk.Err)
 				}
-				event := ojson.GetBytes(chunk.Payload, "type").String()
-				id := ojson.GetBytes(chunk.Payload, "response.id").String()
+				event := gjson.GetBytes(chunk.Payload, "type").String()
+				id := gjson.GetBytes(chunk.Payload, "response.id").String()
 				if event == "response.created" && id == "first" {
 					if scenario == "create_before_steer" {
 						input <- core.WebsocketInput{Payload: request("middle-key")}
@@ -152,7 +154,7 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 					}
 				}
 				if event == "response.steer.accepted" {
-					steerID := ojson.GetBytes(chunk.Payload, "steer.id").String()
+					steerID := gjson.GetBytes(chunk.Payload, "steer.id").String()
 					if scenario == "multiple_steers" && steerID == "s1" {
 						input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"first","input":"second"}`)}
 					} else if !queuedCreate {
@@ -169,7 +171,7 @@ func TestCodexDuplexAutomaticSuccessorMetadata(t *testing.T) {
 					if id == "middle" {
 						want = "middle-key"
 					}
-					if got := ojson.GetBytes(chunk.Payload, "response.prompt_cache_key").String(); got != want {
+					if got := gjson.GetBytes(chunk.Payload, "response.prompt_cache_key").String(); got != want {
 						t.Errorf("%s %s settings = %q, want %q", event, id, got, want)
 					}
 					if id == "automatic" && event == "response.completed" {

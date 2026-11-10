@@ -4,16 +4,14 @@ package interactions
 import (
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Applier implements thinking.ProviderApplier for the native Interactions API.
 type Applier struct{}
-
-var _ thinking.ProviderDocApplier = (*Applier)(nil)
 
 // NewApplier creates a new Interactions thinking applier.
 func NewApplier() *Applier {
@@ -29,76 +27,64 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
 		return body, nil
 	}
-	if len(body) == 0 || !ojson.ValidBytes(body) {
-		body = []byte("{}")
-	}
-	doc := ojson.NewDoc(body)
-	if errApply := a.ApplyDoc(doc, config, modelInfo); errApply != nil {
-		return body, errApply
-	}
-	return doc.Bytes(), nil
-}
-
-// ApplyDoc writes thinking configuration onto doc in place.
-func (a *Applier) ApplyDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) error {
-	if doc == nil {
-		return nil
-	}
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
-		return nil
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		body = []byte(`{}`)
 	}
 
-	summaries, hasSummaries := originalInteractionsThinkingSummariesDoc(doc)
-	includeThoughts, hasIncludeThoughts := originalInteractionsIncludeThoughtsDoc(doc)
-	stripInteractionsThinkingFieldsDoc(doc)
-
+	result := stripInteractionsThinkingFields(body)
 	switch config.Mode {
 	case thinking.ModeLevel:
-		applyInteractionsLevelDoc(doc, string(config.Level), modelInfo, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
+		return applyInteractionsLevel(result, body, string(config.Level), modelInfo), nil
 	case thinking.ModeBudget:
-		applyInteractionsBudgetDoc(doc, config.Budget, modelInfo, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
+		return applyInteractionsBudget(result, body, config.Budget, modelInfo), nil
 	case thinking.ModeAuto:
-		restoreInteractionsThinkingSummariesDoc(doc, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
+		return setInteractionsThinkingSummaries(result, body), nil
 	case thinking.ModeNone:
-		applyInteractionsNoneDoc(doc, config, modelInfo, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
+		return applyInteractionsNone(result, body, config, modelInfo), nil
+	default:
+		return body, nil
 	}
-	return nil
 }
 
-func applyInteractionsBudgetDoc(doc *ojson.Doc, budget int, modelInfo *registry.ModelInfo, summaries string, hasSummaries bool, includeThoughts, hasIncludeThoughts bool) {
+func applyInteractionsBudget(result, original []byte, budget int, modelInfo *registry.ModelInfo) []byte {
 	level, ok := thinking.ConvertBudgetToLevel(budget)
 	if !ok {
-		restoreInteractionsThinkingSummariesDoc(doc, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
-		return
+		return setInteractionsThinkingSummaries(result, original)
 	}
 	switch level {
 	case string(thinking.LevelNone), string(thinking.LevelAuto):
-		restoreInteractionsThinkingSummariesDoc(doc, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
+		// Thinking amount and summary visibility are independent. Interactions has
+		// no wire-level "none" thinking level, so preserve only explicit summary
+		// intent and otherwise let the target model use its documented default.
+		return setInteractionsThinkingSummaries(result, original)
 	default:
-		applyInteractionsLevelDoc(doc, level, modelInfo, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
+		return applyInteractionsLevel(result, original, level, modelInfo)
 	}
 }
 
-func applyInteractionsLevelDoc(doc *ojson.Doc, level string, modelInfo *registry.ModelInfo, summaries string, hasSummaries bool, includeThoughts, hasIncludeThoughts bool) {
+func applyInteractionsLevel(result, original []byte, level string, modelInfo *registry.ModelInfo) []byte {
 	level = normalizeInteractionsLevel(level, modelInfo)
 	if level != "" {
-		_ = doc.Set("generation_config.thinking_level", level)
+		result, _ = sjson.SetBytes(result, "generation_config.thinking_level", level)
 	}
-	restoreInteractionsThinkingSummariesDoc(doc, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
+	return setInteractionsThinkingSummaries(result, original)
 }
 
-func applyInteractionsNoneDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, summaries string, hasSummaries bool, includeThoughts, hasIncludeThoughts bool) {
+func applyInteractionsNone(result, original []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) []byte {
 	if config.Level != "" {
-		applyInteractionsLevelDoc(doc, string(config.Level), modelInfo, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
-		return
+		return applyInteractionsLevel(result, original, string(config.Level), modelInfo)
 	}
 	if config.Budget > 0 {
-		applyInteractionsBudgetDoc(doc, config.Budget, modelInfo, summaries, hasSummaries, includeThoughts, hasIncludeThoughts)
-		return
+		return applyInteractionsBudget(result, original, config.Budget, modelInfo)
 	}
+	// With the amount fully disabled, visibility is irrelevant. Restoring
+	// thinking_summaries alone could make a default-on model reason and return a
+	// summary despite the explicit none override.
+	return result
 }
 
-func stripInteractionsThinkingFieldsDoc(doc *ojson.Doc) {
+func stripInteractionsThinkingFields(body []byte) []byte {
+	result := body
 	for _, path := range []string{
 		"generation_config.thinking_level",
 		"generation_config.thinkingLevel",
@@ -116,31 +102,33 @@ func stripInteractionsThinkingFieldsDoc(doc *ojson.Doc) {
 		"generationConfig.thinking_summaries",
 		"generationConfig.thinkingConfig",
 	} {
-		_ = util.DeleteJSONDocIfExists(doc, path)
+		result, _ = sjson.DeleteBytes(result, path)
 	}
+	return result
 }
 
-func restoreInteractionsThinkingSummariesDoc(doc *ojson.Doc, summaries string, hasSummaries bool, includeThoughts, hasIncludeThoughts bool) {
-	if hasSummaries {
-		_ = doc.Set("generation_config.thinking_summaries", summaries)
-		return
+func setInteractionsThinkingSummaries(result, original []byte) []byte {
+	if value, okValue := originalInteractionsThinkingSummaries(original); okValue {
+		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", value)
+		return result
 	}
-	if hasIncludeThoughts {
+	if includeThoughts, okValue := originalInteractionsIncludeThoughts(original); okValue {
 		value := "none"
 		if includeThoughts {
 			value = "auto"
 		}
-		_ = doc.Set("generation_config.thinking_summaries", value)
+		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", value)
 	}
+	return result
 }
 
-func originalInteractionsThinkingSummariesDoc(doc *ojson.Doc) (string, bool) {
+func originalInteractionsThinkingSummaries(body []byte) (string, bool) {
 	for _, path := range []string{
 		"generation_config.thinking_summaries",
 		"generation_config.thinkingSummaries",
 	} {
-		value := doc.Get(path)
-		if value.Type != ojson.String {
+		value := gjson.GetBytes(body, path)
+		if value.Type != gjson.String {
 			continue
 		}
 		switch normalized := strings.ToLower(strings.TrimSpace(value.String())); normalized {
@@ -151,17 +139,17 @@ func originalInteractionsThinkingSummariesDoc(doc *ojson.Doc) (string, bool) {
 	return "", false
 }
 
-func originalInteractionsIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
+func originalInteractionsIncludeThoughts(body []byte) (bool, bool) {
 	for _, path := range []string{
 		"generation_config.thinking_config.include_thoughts",
 		"generation_config.thinking_config.includeThoughts",
 		"generation_config.thinkingConfig.include_thoughts",
 		"generation_config.thinkingConfig.includeThoughts",
 	} {
-		switch value := doc.Get(path); value.Type {
-		case ojson.True:
+		switch value := gjson.GetBytes(body, path); value.Type {
+		case gjson.True:
 			return true, true
-		case ojson.False:
+		case gjson.False:
 			return false, true
 		}
 	}

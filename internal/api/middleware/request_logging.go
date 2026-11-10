@@ -5,10 +5,8 @@ package middleware
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -16,16 +14,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	maxErrorOnlyCapturedRequestBodyBytes       int64  = 1 << 20  // 1 MiB
-	maxDeferredErrorRequestBodyBytes           int64  = 32 << 20 // 32 MiB
-	maxCapturedZstdWindowBytes                        = 8 << 20  // 8 MiB: covers every zstd level up to 19
-	authenticatedRequestBodyCapturerContextKey string = "CPA_AUTHENTICATED_REQUEST_BODY_CAPTURER"
+	maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20  // 1 MiB
+	maxDeferredErrorRequestBodyBytes     int64 = 32 << 20 // 32 MiB
 )
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
@@ -51,101 +47,43 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		loggerEnabled := logger.IsEnabled()
-		hasMatchedRoute := c.FullPath() != ""
-		captureBody := hasMatchedRoute && shouldCaptureRequestBody(loggerEnabled, c.Request)
+		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)
 
-		// Capture request metadata before authentication without reading the request body.
-		requestInfo, err := captureRequestInfo(c, false)
+		// Capture request information
+		requestInfo, err := captureRequestInfo(c, captureBody)
 		if err != nil {
+			// Log error but continue processing
+			// In a real implementation, you might want to use a proper logger here
 			c.Next()
 			return
 		}
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
-		wrapper.ginContext = c
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
 		c.Writer = wrapper
-		attachRequestLogSources(c, logger, loggerEnabled && hasMatchedRoute)
-		deferredCapture := attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, false, false)
-		if captureBody {
-			c.Set(authenticatedRequestBodyCapturerContextKey, func() {
-				if deferredCapture != nil && deferredCapture.bytesRead == 0 {
-					c.Request.Body = deferredCapture.body
-					requestInfo.deferredBodyCapture = nil
-					deferredCapture.Cleanup()
-					deferredCapture = nil
-				}
-				if errCapture := captureRequestInfoBody(c, requestInfo); errCapture != nil {
-					var maxBytesErr *http.MaxBytesError
-					if errors.As(errCapture, &maxBytesErr) {
-						c.Header("Connection", "close")
-						c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": errCapture.Error()})
-					}
-				}
-			})
-		}
-
-		// Finalize logging after request processing, even if a downstream handler panics
-		// and unwinds to an outer recovery middleware.
-		defer func() {
-			recovered := recover()
-			if recovered != nil && !isAbortHandlerPanic(recovered) {
-				wrapper.panicked = true
-				if !wrapper.ResponseWriter.Written() {
-					wrapper.statusCode = http.StatusInternalServerError
-					if wrapper.streamWriter != nil {
-						_ = wrapper.streamWriter.WriteStatus(http.StatusInternalServerError, wrapper.headers)
-					}
-				}
-			}
-			if errFinalize := wrapper.Finalize(c); errFinalize != nil {
-				// Log error but don't interrupt the response
-				// In a real implementation, you might want to use a proper logger here
-			}
-			if recovered != nil {
-				panic(recovered)
-			}
-		}()
+		attachRequestLogSources(c, logger, loggerEnabled)
+		attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, loggerEnabled, captureBody)
 
 		// Process the request
 		c.Next()
-	}
-}
 
-func isAbortHandlerPanic(recovered any) bool {
-	err, ok := recovered.(error)
-	return ok && errors.Is(err, http.ErrAbortHandler)
+		// Finalize logging after request processing
+		if err = wrapper.Finalize(c); err != nil {
+			// Log error but don't interrupt the response
+			// In a real implementation, you might want to use a proper logger here
+		}
+	}
 }
 
 type fileBodySourceFactory interface {
 	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
 }
 
-// CaptureAuthenticatedRequestBody eagerly captures the request body when full request
-// logging is enabled after the request has passed authentication.
-func CaptureAuthenticatedRequestBody(c *gin.Context) {
-	if c == nil {
-		return
-	}
-	value, exists := c.Get(authenticatedRequestBodyCapturerContextKey)
-	if !exists {
-		return
-	}
-	c.Set(authenticatedRequestBodyCapturerContextKey, nil)
-	capturer, ok := value.(func())
-	if !ok || capturer == nil {
-		return
-	}
-	capturer()
-}
-
 type deferredRequestBodyCapture struct {
 	body          io.ReadCloser
-	factory       fileBodySourceFactory
-	memBuf        bytes.Buffer
 	file          *os.File
 	source        *logging.FileBodySource
 	contentLength int64
@@ -154,22 +92,35 @@ type deferredRequestBodyCapture struct {
 	captureErr    error
 	finished      bool
 	sawEOF        bool
-	skipCapture   bool
 	truncated     bool
 }
 
 func attachDeferredRequestBodyCapture(req *http.Request, logger logging.RequestLogger, requestInfo *RequestInfo, loggerEnabled, bodyCaptured bool) *deferredRequestBodyCapture {
-	if loggerEnabled || bodyCaptured || req == nil || req.Body == nil || req.Body == http.NoBody || (req.ContentLength == 0 && len(req.TransferEncoding) == 0) || requestInfo == nil {
+	if loggerEnabled || bodyCaptured || req == nil || req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0 || requestInfo == nil {
 		return nil
 	}
 	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
-	skipCapture := strings.HasPrefix(contentType, "multipart/form-data") || isResponsesWebsocketUpgrade(req)
-	factory, _ := logger.(fileBodySourceFactory)
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		return nil
+	}
+	factory, ok := logger.(fileBodySourceFactory)
+	if !ok || factory == nil {
+		return nil
+	}
+	source, errSource := factory.NewFileBodySource("request-body")
+	if errSource != nil {
+		return nil
+	}
+	file, errPart := source.CreatePart("body")
+	if errPart != nil {
+		_ = source.Cleanup()
+		return nil
+	}
 	capture := &deferredRequestBodyCapture{
 		body:          req.Body,
-		factory:       factory,
+		file:          file,
+		source:        source,
 		contentLength: req.ContentLength,
-		skipCapture:   skipCapture,
 	}
 	req.Body = capture
 	requestInfo.deferredBodyCapture = capture
@@ -188,7 +139,7 @@ func (c *deferredRequestBodyCapture) Read(payload []byte) (int, error) {
 		return n, errRead
 	}
 	c.bytesRead += int64(n)
-	if c.skipCapture || c.captureErr != nil || c.finished {
+	if c.file == nil || c.captureErr != nil {
 		return n, errRead
 	}
 
@@ -202,50 +153,7 @@ func (c *deferredRequestBodyCapture) Read(payload []byte) (int, error) {
 		writeLength = remaining
 		c.truncated = true
 	}
-	chunk := payload[:int(writeLength)]
-
-	if c.file == nil && c.source == nil {
-		if c.bytesCaptured+writeLength <= maxErrorOnlyCapturedRequestBodyBytes || c.factory == nil {
-			_, _ = c.memBuf.Write(chunk)
-			c.bytesCaptured += writeLength
-			return n, errRead
-		}
-		source, errSource := c.factory.NewFileBodySource("request-body")
-		if errSource != nil {
-			c.captureErr = errSource
-			return n, errRead
-		}
-		file, errPart := source.CreatePart("body")
-		if errPart != nil {
-			_ = source.Cleanup()
-			c.captureErr = errPart
-			return n, errRead
-		}
-		c.source = source
-		c.file = file
-		if c.memBuf.Len() > 0 {
-			buffered := c.memBuf.Bytes()
-			writtenBuf, errWriteBuf := c.file.Write(buffered)
-			if errWriteBuf != nil {
-				c.captureErr = errWriteBuf
-			} else if writtenBuf != len(buffered) {
-				c.captureErr = io.ErrShortWrite
-			}
-			c.memBuf.Reset()
-			if c.captureErr != nil {
-				if errClose := c.file.Close(); errClose != nil {
-					c.captureErr = fmt.Errorf("%v; close capture file: %w", c.captureErr, errClose)
-				}
-				c.file = nil
-				return n, errRead
-			}
-		}
-	}
-
-	if c.file == nil {
-		return n, errRead
-	}
-	written, errWrite := c.file.Write(chunk)
+	written, errWrite := c.file.Write(payload[:int(writeLength)])
 	c.bytesCaptured += int64(written)
 	if errWrite != nil {
 		c.captureErr = errWrite
@@ -290,31 +198,17 @@ func (c *deferredRequestBodyCapture) Finish() error {
 }
 
 func (c *deferredRequestBodyCapture) Bytes() ([]byte, string, error) {
-	if c == nil || c.skipCapture {
+	if c == nil || c.source == nil {
 		return nil, "", nil
 	}
 	if errFinish := c.Finish(); errFinish != nil {
 		return nil, "", errFinish
 	}
-	if c.source != nil {
-		body, errBytes := c.source.Bytes()
-		if errBytes != nil {
-			return nil, "", errBytes
-		}
-		return body, c.statusMarker(), nil
-	}
-	var body []byte
-	if c.memBuf.Len() > 0 {
-		body = bytes.Clone(c.memBuf.Bytes())
+	body, errBytes := c.source.Bytes()
+	if errBytes != nil {
+		return nil, "", errBytes
 	}
 	return body, c.statusMarker(), nil
-}
-
-func (c *deferredRequestBodyCapture) isComplete() bool {
-	if c == nil {
-		return true
-	}
-	return c.sawEOF || (c.contentLength >= 0 && c.bytesRead >= c.contentLength)
 }
 
 func (c *deferredRequestBodyCapture) statusMarker() string {
@@ -325,7 +219,8 @@ func (c *deferredRequestBodyCapture) statusMarker() string {
 	if c.truncated {
 		markers = append(markers, fmt.Sprintf("[REQUEST BODY TRUNCATED: captured first %d bytes]", c.bytesCaptured))
 	}
-	if !c.isComplete() {
+	complete := c.sawEOF || (c.contentLength >= 0 && c.bytesRead >= c.contentLength)
+	if !complete {
 		if c.contentLength >= 0 {
 			markers = append(markers, fmt.Sprintf("[REQUEST BODY CAPTURE INCOMPLETE: consumed %d of %d bytes]", c.bytesRead, c.contentLength))
 		} else {
@@ -336,15 +231,11 @@ func (c *deferredRequestBodyCapture) statusMarker() string {
 }
 
 func (c *deferredRequestBodyCapture) Cleanup() {
-	if c == nil {
+	if c == nil || c.source == nil {
 		return
 	}
 	if errFinish := c.Finish(); errFinish != nil {
 		log.WithError(errFinish).Warn("failed to finish deferred request body capture")
-	}
-	c.memBuf.Reset()
-	if c.source == nil {
-		return
 	}
 	if errCleanup := c.source.Cleanup(); errCleanup != nil {
 		log.WithError(errCleanup).Warn("failed to clean up deferred request body capture")
@@ -398,10 +289,20 @@ func isResponsesWebsocketUpgrade(req *http.Request) bool {
 }
 
 func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
-	if !loggerEnabled {
+	if loggerEnabled {
+		return true
+	}
+	if req == nil || req.Body == nil {
 		return false
 	}
-	return req != nil && req.Body != nil
+	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		return false
+	}
+	if req.ContentLength <= 0 {
+		return false
+	}
+	return req.ContentLength <= maxErrorOnlyCapturedRequestBodyBytes
 }
 
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
@@ -426,38 +327,40 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		headers = make(map[string][]string)
 	}
 
-	info := &RequestInfo{
+	// Capture request body
+	var body []byte
+	if captureBody && c.Request.Body != nil {
+		// Read the body
+		bodyBytes, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		// Restore the body for the actual request processing
+		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
+	}
+
+	return &RequestInfo{
 		URL:       url,
 		Method:    method,
 		Headers:   headers,
+		Body:      body,
 		RequestID: logging.GetGinRequestID(c),
 		Timestamp: time.Now(),
-	}
-	if captureBody {
-		if errCapture := captureRequestInfoBody(c, info); errCapture != nil {
-			return nil, errCapture
-		}
-	}
-	return info, nil
+	}, nil
 }
 
-func captureRequestInfoBody(c *gin.Context, info *RequestInfo) error {
-	if c == nil || c.Request == nil || c.Request.Body == nil || info == nil {
-		return nil
+func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {
+	if len(raw) == 0 {
+		return raw
 	}
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return err
+
+	decoded, errDecode := decodeCapturedRequestBody(raw, encoding)
+	if errDecode != nil {
+		return raw
 	}
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	// The decoded body is bounded even when no max-request-body-bytes is configured:
-	// a small zstd body can expand to gigabytes.
-	maxBytes := c.GetInt64("maxRequestBodyBytes")
-	if maxBytes <= 0 || maxBytes > maxDeferredErrorRequestBodyBytes {
-		maxBytes = maxDeferredErrorRequestBodyBytes
-	}
-	info.Body = decodeCapturedRequestBodyForLogWithLimit(bodyBytes, c.Request.Header.Get("Content-Encoding"), maxBytes)
-	return nil
+	return decoded
 }
 
 func decodeCapturedRequestBodyForLogWithLimit(raw []byte, encoding string, limit int64) []byte {
@@ -495,19 +398,54 @@ func decodeCapturedRequestBodyForLogWithLimit(raw []byte, encoding string, limit
 	return body
 }
 
+func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
+	encoding = strings.TrimSpace(encoding)
+	if encoding == "" || strings.EqualFold(encoding, "identity") {
+		return raw, nil
+	}
+
+	parts := strings.Split(encoding, ",")
+	body := raw
+	for i := len(parts) - 1; i >= 0; i-- {
+		enc := strings.ToLower(strings.TrimSpace(parts[i]))
+		switch enc {
+		case "", "identity":
+			continue
+		case "zstd":
+			decoded, errDecode := decodeCapturedZstdRequestBody(body)
+			if errDecode != nil {
+				return nil, errDecode
+			}
+			body = decoded
+		default:
+			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
+		}
+	}
+	return body, nil
+}
+
+func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
+	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
+	if errNewReader != nil {
+		return nil, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
+	}
+	defer decoder.Close()
+
+	decoded, errRead := io.ReadAll(decoder)
+	if errRead != nil {
+		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
+	}
+	return decoded, nil
+}
+
 func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bool, error) {
-	// One decoder goroutine and a bounded window: a frame that declares a larger window is not decoded (the raw bytes are logged).
-	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw), zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxWindow(maxCapturedZstdWindowBytes))
+	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
 	if errNewReader != nil {
 		return nil, false, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
 	}
 	defer decoder.Close()
 
-	var reader io.Reader = decoder
-	if limit > 0 && limit < math.MaxInt64 {
-		reader = io.LimitReader(decoder, limit+1)
-	}
-	decoded, errRead := io.ReadAll(reader)
+	decoded, errRead := io.ReadAll(io.LimitReader(decoder, limit+1))
 	if errRead != nil {
 		return nil, false, fmt.Errorf("failed to decode zstd request body: %w", errRead)
 	}
@@ -521,7 +459,7 @@ func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bo
 // It skips management endpoints to avoid leaking secrets but allows
 // all other routes, including module-provided ones, to honor request-log.
 func shouldLogRequest(path string) bool {
-	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/v8/management") || strings.HasPrefix(path, "/management") {
+	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
 		return false
 	}
 

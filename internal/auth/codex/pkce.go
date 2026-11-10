@@ -6,9 +6,8 @@ package codex
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
-
-	"github.com/MoeForge/moego/base64"
 )
 
 // GeneratePKCECodes generates a new pair of PKCE (Proof Key for Code Exchange) codes.
@@ -44,7 +43,7 @@ func generateCodeVerifier() (string, error) {
 	}
 
 	// Encode to URL-safe base64 without padding
-	return base64.RawURLEncoding.EncodeToString(bytes), nil
+	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(bytes), nil
 }
 
 // generateCodeChallenge creates a code challenge from a given code verifier.
@@ -53,5 +52,5 @@ func generateCodeVerifier() (string, error) {
 // request and later verified against the verifier.
 func generateCodeChallenge(codeVerifier string) string {
 	hash := sha256.Sum256([]byte(codeVerifier))
-	return base64.RawURLEncoding.EncodeToString(hash[:])
+	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(hash[:])
 }

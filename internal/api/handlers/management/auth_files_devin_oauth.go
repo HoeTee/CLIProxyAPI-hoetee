@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/devin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -35,11 +35,10 @@ var newDevinOAuthService = func(cfg *config.Config) devinOAuthService {
 // Devin's authorization page strictly validates that redirect_uri matches
 // http://127.0.0.1:<port>/callback (http protocol, 127.0.0.1 host, and /callback path).
 func (h *Handler) devinCallbackURL() (string, error) {
-	cfg := h.configSnapshot()
-	if h == nil || cfg == nil || cfg.Port <= 0 {
+	if h == nil || h.cfg == nil || h.cfg.Port <= 0 {
 		return "", fmt.Errorf("server port is not configured")
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d/callback", cfg.Port), nil
+	return fmt.Sprintf("http://127.0.0.1:%d/callback", h.cfg.Port), nil
 }
 
 // RequestDevinToken starts the same callback/status flow used by the other WebUI providers.
@@ -60,25 +59,17 @@ func (h *Handler) RequestDevinToken(c *gin.Context) {
 		return
 	}
 
-	sessionProxyURL := oauthSessionProxyURLFromContext(c)
-	cfg := h.oauthConfigWithProxy(sessionProxyURL)
-	authSvc := newDevinOAuthService(cfg)
+	authSvc := newDevinOAuthService(h.cfg)
 	authURL := authSvc.BuildAuthorizationURL(redirectURI, pkceCodes.CodeChallenge, state)
-	RegisterOAuthSessionWithProxy(state, "devin", sessionProxyURL)
-	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
-	bindOAuthSessionTarget(c, state, respPayload)
+	RegisterOAuthSession(state, "devin")
 	// Do not inherit the HTTP request cancellation: login continues after returning the URL.
 	ctx := PopulateAuthContext(context.Background(), c)
-	authDir := ""
-	if cfg != nil {
-		authDir = cfg.AuthDir
-	}
+	authDir := h.cfg.AuthDir
 	go h.completeDevinOAuth(ctx, authDir, state, pkceCodes.CodeVerifier, authSvc)
-	c.JSON(http.StatusOK, respPayload)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
 func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVerifier string, authSvc devinOAuthService) {
-	sessionProxyURL := GetOAuthSessionProxyURL(state)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	go watchOAuthSessionCancel(ctx, cancel, state, "devin")
@@ -130,9 +121,14 @@ func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVe
 		}
 		return
 	}
-	if _, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "devin", sessionProxyURL, record, "Failed to save authentication tokens", false); !okSaved {
+	if errGuard := guardOAuthSessionPendingForSave(state, "devin"); errGuard != nil {
 		return
 	}
+	if _, errSave := h.saveTokenRecord(ctx, record); errSave != nil {
+		SetOAuthSessionError(state, "Failed to save authentication tokens")
+		return
+	}
+	CompleteOAuthSession(state)
 	log.Info("Devin authentication successful")
 }
 

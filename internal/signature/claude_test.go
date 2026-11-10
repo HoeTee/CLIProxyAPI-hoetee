@@ -1,11 +1,11 @@
 package signature
 
 import (
-	"github.com/MoeForge/moego/base64"
+	"encoding/base64"
 	"strings"
 	"testing"
 
-	"github.com/MoeForge/moego/ojson"
+	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -21,7 +21,7 @@ func TestStripInvalidClaudeThinkingBlocks_RemovesGPTEncryptedContent(t *testing.
 	}`)
 
 	out := StripInvalidClaudeThinkingBlocks(input)
-	content := ojson.GetBytes(out, "messages.0.content").Array()
+	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(out))
 	}
@@ -44,7 +44,7 @@ func TestStripInvalidClaudeThinkingBlocksAndEmptyMessages_DropsMessagesLeftEmpty
 	}`)
 
 	out := StripInvalidClaudeThinkingBlocksAndEmptyMessages(input)
-	messages := ojson.GetBytes(out, "messages").Array()
+	messages := gjson.GetBytes(out, "messages").Array()
 	if len(messages) != 1 {
 		t.Fatalf("messages length = %d, want 1: %s", len(messages), string(out))
 	}
@@ -53,27 +53,6 @@ func TestStripInvalidClaudeThinkingBlocksAndEmptyMessages_DropsMessagesLeftEmpty
 	}
 	if strings.Contains(string(out), "gAAAAABopenai-encrypted-content") || strings.Contains(string(out), "codex reasoning") {
 		t.Fatalf("invalid thinking block was preserved: %s", string(out))
-	}
-}
-
-func TestStripInvalidClaudeThinkingBlocksAndEmptyMessages_DropsPreExistingAndNewlyEmptyMessages(t *testing.T) {
-	input := []byte(`{
-		"messages": [
-			{"role":"assistant","content":[]},
-			{"role":"assistant","content":[
-				{"type":"thinking","thinking":"codex reasoning","signature":"gAAAAABopenai-encrypted-content"}
-			]},
-			{"role":"user","content":[{"type":"text","text":"next"}]}
-		]
-	}`)
-
-	out := StripInvalidClaudeThinkingBlocksAndEmptyMessages(input)
-	messages := ojson.GetBytesNoCopy(out, "messages").Array()
-	if len(messages) != 1 {
-		t.Fatalf("messages length = %d, want 1: %s", len(messages), string(out))
-	}
-	if got := messages[0].Get("role").String(); got != "user" {
-		t.Fatalf("remaining role = %q, want user", got)
 	}
 }
 
@@ -86,7 +65,7 @@ func TestStripInvalidClaudeThinkingBlocks_RemovesMalformedEPrefix(t *testing.T) 
 	}`)
 
 	out := StripInvalidClaudeThinkingBlocks(input)
-	content := ojson.GetBytes(out, "messages.0.content").Array()
+	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("content length = %d, want 1: %s", len(content), string(out))
 	}
@@ -104,7 +83,7 @@ func TestStripInvalidClaudeThinkingBlocks_Base64OnlyKeepsDecodableEPrefix(t *tes
 	}`)
 
 	out := StripInvalidClaudeThinkingBlocks(input, ClaudeSignatureValidationOptions{Base64Only: true})
-	content := ojson.GetBytes(out, "messages.0.content").Array()
+	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("content length = %d, want 2: %s", len(content), string(out))
 	}
@@ -119,7 +98,7 @@ func TestStripInvalidClaudeThinkingBlocks_Base64OnlyRemovesInvalidBase64(t *test
 	}`)
 
 	out := StripInvalidClaudeThinkingBlocks(input, ClaudeSignatureValidationOptions{Base64Only: true})
-	content := ojson.GetBytes(out, "messages.0.content").Array()
+	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("content length = %d, want 1: %s", len(content), string(out))
 	}
@@ -140,7 +119,7 @@ func TestStripInvalidClaudeThinkingBlocks_AllowsEmptySignatureEmptyTextPlacehold
 		Base64Only:                       true,
 		AllowEmptySignatureWithEmptyText: true,
 	})
-	content := ojson.GetBytes(out, "messages.0.content").Array()
+	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("content length = %d, want 2: %s", len(content), string(out))
 	}
@@ -156,7 +135,7 @@ func TestStripInvalidClaudeThinkingBlocks_StrictRemovesMalformedClaudeTree(t *te
 	}`)
 
 	out := StripInvalidClaudeThinkingBlocks(input, ClaudeSignatureValidationOptions{Strict: true})
-	content := ojson.GetBytes(out, "messages.0.content").Array()
+	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("content length = %d, want 1: %s", len(content), string(out))
 	}
@@ -176,7 +155,7 @@ func TestStripInvalidClaudeThinkingBlocks_KeepsClaudeSignaturePrefixes(t *testin
 	}`)
 
 	out := StripInvalidClaudeThinkingBlocks(input)
-	content := ojson.GetBytes(out, "messages.0.content").Array()
+	content := gjson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("content length = %d, want 2: %s", len(content), string(out))
 	}
@@ -506,7 +485,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_ClaudeCAIS(t *testing.T) {
 	if reportSame.Preserved != 1 || reportSame.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report for same model: %+v", reportSame)
 	}
-	if got := ojson.GetBytes(outputSame, "messages.0.content.0.signature").String(); got != observedFable5Sample {
+	if got := gjson.GetBytes(outputSame, "messages.0.content.0.signature").String(); got != observedFable5Sample {
 		t.Fatalf("signature = %q, want preserved %q", got, observedFable5Sample)
 	}
 
@@ -515,7 +494,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_ClaudeCAIS(t *testing.T) {
 	if reportTool.Preserved != 1 {
 		t.Fatalf("unexpected report for tool input: %+v", reportTool)
 	}
-	partsTool := ojson.GetBytes(outputTool, "messages.0.content").Array()
+	partsTool := gjson.GetBytes(outputTool, "messages.0.content").Array()
 	if len(partsTool) != 3 {
 		t.Fatalf("content len = %d, want 3", len(partsTool))
 	}
@@ -531,7 +510,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_ClaudeCAIS(t *testing.T) {
 	if reportDiff.Preserved != 1 || reportDiff.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report for cross model: %+v", reportDiff)
 	}
-	partsDiff := ojson.GetBytes(outputDiff, "messages.0.content").Array()
+	partsDiff := gjson.GetBytes(outputDiff, "messages.0.content").Array()
 	if len(partsDiff) != 2 {
 		t.Fatalf("content len = %d, want 2: %s", len(partsDiff), outputDiff)
 	}
@@ -615,7 +594,7 @@ func TestClaudeCAISSignature_ToleratesUpstreamFieldDrift(t *testing.T) {
 			if report.Preserved != 1 || report.DroppedBlocks != 0 {
 				t.Fatalf("report = %+v, want preserved thinking block", report)
 			}
-			if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != sig {
+			if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != sig {
 				t.Fatalf("signature = %q, want preserved %q", got, sig)
 			}
 		})
@@ -721,7 +700,7 @@ func TestClaudeCAISSignature_DoesNotShadowClassicClaudeSignature(t *testing.T) {
 	if report.Preserved != 1 || report.DroppedBlocks != 0 {
 		t.Fatalf("report = %+v, want preserved classic thinking block", report)
 	}
-	if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != classic {
+	if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != classic {
 		t.Fatalf("signature = %q, want provider-native E-form %q", got, classic)
 	}
 }
@@ -739,7 +718,7 @@ func TestClaudeCAISSignature_CachePrefixSurvivesClaudeUpstreamSanitize(t *testin
 			if report.Preserved != 1 || report.DroppedBlocks != 0 {
 				t.Fatalf("report = %+v, want preserved thinking block", report)
 			}
-			if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != observedFable5Sample {
+			if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != observedFable5Sample {
 				t.Fatalf("signature = %q, want unprefixed %q", got, observedFable5Sample)
 			}
 		})

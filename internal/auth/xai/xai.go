@@ -2,6 +2,7 @@ package xai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,9 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/MoeForge/moego/base64"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -466,8 +466,9 @@ func parseJWTIdentity(token string) (email string, subject string) {
 	if len(parts) < 2 {
 		return "", ""
 	}
-	payload := strings.TrimRight(parts[1], "=")
-	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	payload := parts[1]
+	payload += strings.Repeat("=", (4-len(payload)%4)%4)
+	raw, err := base64.URLEncoding.DecodeString(payload)
 	if err != nil {
 		return "", ""
 	}

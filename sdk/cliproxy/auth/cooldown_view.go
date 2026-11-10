@@ -51,38 +51,31 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 	for _, key := range keys {
 		state := auth.ModelStates[key]
 		model := canonicalModelKey(key)
-		lookupKey := canonicalModelLookupKey(model)
-		if state == nil || model == "" || lookupKey == "" {
+		if state == nil || model == "" {
 			continue
 		}
 		blocked, reason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
 		if !blocked || !next.After(now) {
 			continue
 		}
-		modelName := model
-		if previous, ok := byModel[lookupKey]; ok {
-			if previous.view.ModelKey != "" {
-				modelName = previous.view.ModelKey
-			}
+		if previous, ok := byModel[model]; ok {
 			preferQuotaTie := next.Equal(previous.view.RetryAt) && reason == blockReasonCooldown && previous.reason != blockReasonCooldown
 			if !next.After(previous.view.RetryAt) && !preferQuotaTie {
 				continue
 			}
 		}
-		byModel[lookupKey] = modelCooldown{
-			view:   newCooldownView("model", modelName, next, now, state.Quota, state.StatusMessage, state.LastError),
+		byModel[model] = modelCooldown{
+			view:   newCooldownView("model", model, next, now, state.Quota, state.StatusMessage, state.LastError),
 			reason: reason,
 		}
 	}
 	models := make([]string, 0, len(byModel))
-	for lookupKey := range byModel {
-		models = append(models, lookupKey)
+	for model := range byModel {
+		models = append(models, model)
 	}
-	sort.Slice(models, func(i, j int) bool {
-		return byModel[models[i]].view.ModelKey < byModel[models[j]].view.ModelKey
-	})
-	for _, lookupKey := range models {
-		views = append(views, byModel[lookupKey].view)
+	sort.Strings(models)
+	for _, model := range models {
+		views = append(views, byModel[model].view)
 	}
 	return views
 }
@@ -139,10 +132,6 @@ func cooldownErrorReason(err *Error) string {
 		return "cloudflare_challenge"
 	case isInvalidGrantResultError(err):
 		return "invalid_grant"
-	case isCreditBalanceTooLowResultError(err):
-		return "payment_required"
-	case isTransientRateLimitResultError(err):
-		return "transient_rate_limit"
 	}
 	switch statusCodeFromResult(err) {
 	case 401:
@@ -176,8 +165,6 @@ func cooldownStatusReason(message string) string {
 		return "model_not_supported"
 	case "transient upstream error":
 		return "transient_error"
-	case transientRateLimitErrorCode:
-		return "transient_rate_limit"
 	default:
 		return "unknown"
 	}

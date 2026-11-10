@@ -3,9 +3,8 @@ package devin
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
-
-	"github.com/MoeForge/moego/base64"
 )
 
 // PKCECodes contains the PKCE code verifier and code challenge pair.

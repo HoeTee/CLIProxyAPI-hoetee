@@ -18,8 +18,11 @@ LICENSE
 # Runtime data folders (should be mounted as volumes)
 auths
 logs
+data
 conv
 config.yaml
+.env
+.codex-attachments
 
 # Development/editor
 bin
