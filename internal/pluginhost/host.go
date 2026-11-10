@@ -1057,7 +1057,8 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.UsagePlugin != nil ||
 		caps.CommandLinePlugin != nil ||
 		caps.ManagementAPI != nil ||
-		caps.QuotaProvider != nil
+		caps.QuotaProvider != nil ||
+		caps.ClientQuota != nil
 }
 
 func typeName(v any) string {

@@ -163,6 +163,10 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 		parentSessionID = ""
 	}
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
+		RequestID:           record.RequestID,
+		ClientID:            record.ClientID,
+		CodexWeeklyUSD:      record.CodexWeeklyUSD,
+		DeepSeekLimitCNY:    record.DeepSeekLimitCNY,
 		Provider:            record.Provider,
 		BaseURL:             record.BaseURL,
 		ExecutorType:        record.ExecutorType,
@@ -195,6 +199,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			ReasoningTokens:     record.Detail.ReasoningTokens,
 			CachedTokens:        record.Detail.CachedTokens,
 			CacheReadTokens:     record.Detail.CacheReadTokens,
+			CacheMissTokens:     record.Detail.CacheMissTokens,
 			CacheCreationTokens: record.Detail.CacheCreationTokens,
 			TotalTokens:         record.Detail.TotalTokens,
 		},

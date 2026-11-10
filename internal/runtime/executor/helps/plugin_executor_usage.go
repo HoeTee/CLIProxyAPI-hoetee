@@ -143,6 +143,7 @@ func ObserveMergedStreamUsage(buffer *StreamUsageBuffer, update usage.Detail) {
 // MergeStreamUsageDetail merges existing stream usage with a newer update.
 func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	merged := update
+	merged.TokenFields |= existing.TokenFields
 	if merged.InputTokens == 0 && existing.InputTokens > 0 {
 		merged.InputTokens = existing.InputTokens
 	}
@@ -151,6 +152,9 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	}
 	if merged.CacheReadTokens == 0 && existing.CacheReadTokens > 0 {
 		merged.CacheReadTokens = existing.CacheReadTokens
+	}
+	if merged.CacheMissTokens == 0 && existing.CacheMissTokens > 0 {
+		merged.CacheMissTokens = existing.CacheMissTokens
 	}
 	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
 		merged.CacheCreationTokens = existing.CacheCreationTokens

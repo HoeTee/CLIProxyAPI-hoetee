@@ -92,6 +92,10 @@ const (
 	MethodQuotaFetch      = "quota.fetch"
 	MethodQuotaReset      = "quota.reset"
 
+	MethodClientQuotaAdmit    = "client_quota.admit"
+	MethodClientQuotaRecord   = "client_quota.record"
+	MethodClientQuotaSnapshot = "client_quota.snapshot"
+
 	MethodHostHTTPDo             = "host.http.do"
 	MethodHostHTTPDoStream       = "host.http.do_stream"
 	MethodHostHTTPStreamRead     = "host.http.stream_read"

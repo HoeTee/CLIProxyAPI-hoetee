@@ -631,10 +631,10 @@ func grokModelsFromHomeEntries(entries []homeModelEntry) []grokbuild.ModelInfo {
 	return models
 }
 
-func grokModelsFromRegistryInfos(infos []*registry.ModelInfo) []grokbuild.ModelInfo {
+func grokModelsFromRegistryInfos(c *gin.Context, infos []*registry.ModelInfo) []grokbuild.ModelInfo {
 	models := make([]grokbuild.ModelInfo, 0, len(infos))
 	for _, info := range infos {
-		if info == nil {
+		if info == nil || !handlers.ClientCanSeeModel(c, info.ID) {
 			continue
 		}
 		model := grokbuild.ModelInfo{
@@ -659,7 +659,7 @@ func (s *Server) handleGrokModels(c *gin.Context) {
 		}
 		models = grokModelsFromHomeEntries(entries)
 	} else {
-		models = grokModelsFromRegistryInfos(registry.GetGlobalRegistry().GetAvailableModelInfos())
+		models = grokModelsFromRegistryInfos(c, registry.GetGlobalRegistry().GetAvailableModelInfos())
 	}
 	s.writeModelListResponse(c, "openai", grokbuild.BuildResponse(models))
 }

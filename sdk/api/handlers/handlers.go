@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
@@ -240,10 +241,35 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
 		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
 	}
+	copyClientAccessMetadata(ginCtx, meta)
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
 	return meta
+}
+
+func copyClientAccessMetadata(ginCtx *gin.Context, meta map[string]any) {
+	if ginCtx == nil || meta == nil {
+		return
+	}
+	raw, exists := ginCtx.Get("accessMetadata")
+	if !exists {
+		return
+	}
+	accessMetadata, ok := raw.(map[string]string)
+	if !ok {
+		return
+	}
+	for _, key := range []string{
+		sdkaccess.ClientProvidersMetadataKey,
+		coreexecutor.ClientIDMetadataKey,
+		coreexecutor.CodexWeeklyUSDMetadataKey,
+		coreexecutor.DeepSeekLimitCNYMetadataKey,
+	} {
+		if value := strings.TrimSpace(accessMetadata[key]); value != "" {
+			meta[key] = value
+		}
+	}
 }
 
 func requestClientIP(request *http.Request) string {
@@ -370,6 +396,7 @@ type BaseAPIHandler struct {
 	// ModelRouterHost optionally routes matching requests to a plugin executor, the router's own
 	// executor, or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouterHost PluginModelRouterHost
+	usageHistory    coreusage.HistoryRecorder
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.

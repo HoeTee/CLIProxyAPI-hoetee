@@ -39,8 +39,10 @@ const attemptMaxIdleTime = 2 * time.Hour
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
 	cfg                     *config.Config
+	runtimeClients          []config.ClientConfig
 	configFilePath          string
 	mu                      sync.Mutex
+	clientChangeMu          sync.Mutex
 	authStatusMu            sync.Mutex
 	reloadMu                sync.Mutex
 	reloadGeneration        uint64
@@ -57,6 +59,7 @@ type Handler struct {
 	postAuthPersistHook     coreauth.PostAuthHook
 	pluginHost              *pluginhost.Host
 	configReloadHook        func(context.Context, *config.Config)
+	configReloadReady       func() bool
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
@@ -81,6 +84,9 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+	}
+	if cfg != nil {
+		h.runtimeClients = cfg.Clients
 	}
 	h.startAttemptCleanup()
 	return h
@@ -128,6 +134,10 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	}
 	h.mu.Lock()
 	h.cfg = cfg
+	h.runtimeClients = nil
+	if cfg != nil {
+		h.runtimeClients = cfg.Clients
+	}
 	h.mu.Unlock()
 }
 
@@ -152,12 +162,16 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 }
 
 // SetConfigReloadHook updates the callback used after management saves config changes.
-func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)) {
+func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config), ready ...func() bool) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
 	h.configReloadHook = hook
+	h.configReloadReady = nil
+	if len(ready) > 0 {
+		h.configReloadReady = ready[0]
+	}
 	h.mu.Unlock()
 }
 

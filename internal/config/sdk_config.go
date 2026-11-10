@@ -57,6 +57,9 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// Clients defines named downstream credentials and their provider quotas.
+	Clients []ClientConfig `yaml:"clients" json:"clients"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -67,6 +70,44 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// ClientConfig defines one downstream caller. ID remains stable when APIKey is rotated.
+type ClientConfig struct {
+	ID               string       `yaml:"id" json:"id"`
+	APIKey           string       `yaml:"api-key,omitempty" json:"api-key,omitempty"`
+	APIKeySHA256     string       `yaml:"api-key-sha256,omitempty" json:"-"`
+	Disabled         bool         `yaml:"disabled,omitempty" json:"disabled"`
+	AllowedProviders []string     `yaml:"allowed-providers,omitempty" json:"allowed-providers"`
+	Quotas           ClientQuotas `yaml:"quotas" json:"quotas"`
+}
+
+// ClientQuotas contains optional provider-specific spending limits.
+type ClientQuotas struct {
+	Codex    *CodexClientQuota    `yaml:"codex,omitempty" json:"codex,omitempty"`
+	DeepSeek *DeepSeekClientQuota `yaml:"deepseek,omitempty" json:"deepseek,omitempty"`
+	GLM      *GLMClientQuota      `yaml:"glm,omitempty" json:"glm,omitempty"`
+}
+
+// GLMClientQuota meters each window independently. A nil limit is unlimited.
+type GLMClientQuota struct {
+	FiveHourTokens *int64 `yaml:"five-hour-tokens" json:"five_hour_tokens"`
+	WeeklyTokens   *int64 `yaml:"weekly-tokens" json:"weekly_tokens"`
+}
+
+func (q GLMClientQuota) Valid() bool {
+	return (q.FiveHourTokens == nil || *q.FiveHourTokens > 0) &&
+		(q.WeeklyTokens == nil || *q.WeeklyTokens > 0)
+}
+
+// CodexClientQuota is a recurring local API-equivalent weekly USD allowance.
+type CodexClientQuota struct {
+	WeeklyUSD float64 `yaml:"weekly-usd" json:"weekly-usd"`
+}
+
+// DeepSeekClientQuota is a lifetime cumulative CNY allowance.
+type DeepSeekClientQuota struct {
+	LimitCNY float64 `yaml:"limit-cny" json:"limit-cny"`
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

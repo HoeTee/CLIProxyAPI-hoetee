@@ -64,7 +64,18 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 	if tuiMode && !standalone {
 		return false
 	}
-	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+	return safemode.HasExampleAPIKeys(configuredClientAPIKeys(cfg))
+}
+
+func configuredClientAPIKeys(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	keys := append([]string(nil), cfg.APIKeys...)
+	for _, client := range cfg.Clients {
+		keys = append(keys, client.APIKey)
+	}
+	return keys
 }
 
 // main is the entry point of the application.
@@ -657,8 +668,11 @@ func main() {
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
 	serverOptions := []api.ServerOption(nil)
+	if !homeMode && !commandMode && !cloudConfigMissing && (!tuiMode || standalone) {
+		serverOptions = append(serverOptions, api.WithUsageHistory(filepath.Join(filepath.Dir(configFilePath), "data", "usage.sqlite")))
+	}
 	if exampleAPIKeySafeMode {
-		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
+		matches := safemode.ExampleAPIKeys(configuredClientAPIKeys(cfg))
 		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; proxy API endpoints disabled until api-keys is updated")
 		serverOptions = append(serverOptions, api.WithExampleAPIKeySafeMode())
 	}

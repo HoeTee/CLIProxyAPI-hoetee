@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -10,7 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"golang.org/x/net/context"
 )
@@ -112,6 +115,30 @@ type requestLifecycleTracker struct {
 	host         PluginInterceptorHost
 	skipPluginID string
 	completion   pluginapi.RequestCompletion
+	history      *coreusage.HistoryRequest
+}
+
+func (h *BaseAPIHandler) SetUsageHistoryRecorder(recorder coreusage.HistoryRecorder) {
+	h.usageHistory = recorder
+}
+
+func (h *BaseAPIHandler) observeHistory(ctx context.Context, t *requestLifecycleTracker, providers ...string) context.Context {
+	if h.usageHistory == nil || t == nil {
+		return ctx
+	}
+	client, _ := t.completion.Metadata[coreexecutor.ClientIDMetadataKey].(string)
+	provider := ""
+	if len(providers) == 1 {
+		provider = providers[0]
+	}
+	model := t.completion.RequestedModel
+	if model == "" {
+		model = t.completion.Model
+	}
+	ctx, t.history = coreusage.BeginHistoryRequest(ctx, h.usageHistory, coreusage.HistoryResult{
+		ID: t.completion.RequestID, At: t.completion.StartedAt, ClientID: client, Provider: provider, Model: model,
+	})
+	return ctx
 }
 
 func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceFormat, model, requestedModel string, stream bool, metadata map[string]any, skipPluginID string) *requestLifecycleTracker {
@@ -141,6 +168,22 @@ func (t *requestLifecycleTracker) requestID() string {
 	return t.completion.RequestID
 }
 
+func (t *requestLifecycleTracker) completeHistory(outcome pluginapi.RequestCompletionOutcome, statusCode int, err error) {
+	if t == nil || t.history == nil {
+		return
+	}
+	var requestStop interface{ IsRequestStop() bool }
+	var policy *coreauth.Error
+	if outcome == pluginapi.RequestCompletionFailed {
+		if (statusCode == http.StatusTooManyRequests || statusCode == http.StatusForbidden) && errors.As(err, &requestStop) && requestStop.IsRequestStop() {
+			outcome = pluginapi.RequestCompletionRejected
+		} else if statusCode == http.StatusForbidden && errors.As(err, &policy) && policy != nil && policy.Code == "provider_not_allowed" {
+			outcome = pluginapi.RequestCompletionRejected
+		}
+	}
+	t.history.Complete(string(outcome), statusCode)
+}
+
 func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOutcome, statusCode int, err error) {
 	if t == nil {
 		return
@@ -153,6 +196,7 @@ func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOu
 		if err != nil {
 			completion.Error = err.Error()
 		}
+		t.completeHistory(outcome, statusCode, err)
 		if t.skipPluginID != "" {
 			if host, ok := t.host.(requestLifecycleSkipHost); ok {
 				host.CompleteRequestExcept(t.ctx, completion, t.skipPluginID)
@@ -553,6 +597,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		return coreexecutor.RequestAfterAuthInterceptResponse{}
 	}
 	resp := interceptRequestAfterAuth(ctx, host, pluginapi.RequestInterceptRequest{
+		Provider:       req.Provider,
 		RequestID:      requestID,
 		TraceID:        logging.GetRequestID(ctx),
 		SourceFormat:   req.SourceFormat.String(),

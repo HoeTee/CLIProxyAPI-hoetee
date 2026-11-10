@@ -300,7 +300,7 @@ func (b *Builder) Build() (*Service, error) {
 		api.WithPluginHost(pluginHost),
 		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
 			service.reloadConfigFromWatcher()
-		}),
+		}, service.watcherReady.Load),
 	)
 	return service, nil
 }

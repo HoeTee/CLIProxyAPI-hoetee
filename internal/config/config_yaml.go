@@ -341,6 +341,17 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
+	fullPath := strings.Join(path, ".")
+	// A configured GLM quota with two null limits grants unlimited access.
+	switch fullPath {
+	case "clients.quotas":
+		if findMapKeyIndex(node, "glm") >= 0 {
+			return false
+		}
+	case "clients.quotas.glm", "clients.quotas.glm.five-hour-tokens", "clients.quotas.glm.weekly-tokens":
+		return false
+	}
+
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true
@@ -350,8 +361,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if len(path) == 0 {
 		return false
 	}
-
-	fullPath := strings.Join(path, ".")
 
 	// Check string defaults
 	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
@@ -783,6 +792,9 @@ func shouldPruneNestedMappingKeys(path []string) bool {
 	}
 	parent := path[len(path)-2]
 	last := path[len(path)-1]
+	if path[0] == "clients" && path[1] == "quotas" {
+		return true
+	}
 	switch parent {
 	case "claude-api-key":
 		return last == "cloak" || last == "headers"

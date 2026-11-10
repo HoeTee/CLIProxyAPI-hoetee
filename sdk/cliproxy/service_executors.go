@@ -6,11 +6,13 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/glmquota"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 type openAICompatibilityRegistrationCache struct {
@@ -341,6 +343,12 @@ func (s *Service) registerOpenAICompatProviderExecutor(providerKey string, auth 
 		providerKey = "openai-compatibility"
 	}
 	compatExecutor := executor.NewOpenAICompatExecutor(providerKey, cfg)
+	if providerKey == glmquota.ProviderKey {
+		host := s.pluginHost
+		compatExecutor.SetGLMQuotaPlugin(func() pluginapi.ClientQuotaPlugin {
+			return host.ClientQuotaPlugin(glmquota.PluginID)
+		})
+	}
 	nextExecutor := s.wrapOpenAICompatIfPluginAuth(compatExecutor, auth, cfg)
 	if !forceReplace {
 		if existingExecutor, hasExecutor := s.coreManager.Executor(providerKey); hasExecutor {

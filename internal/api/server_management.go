@@ -28,8 +28,17 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/config", s.mgmt.GetConfig)
+		mgmt.GET("/provider-overview", s.mgmt.GetProviderOverview)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
+		mgmt.GET("/codex-client-quotas", s.mgmt.GetCodexClientQuotas)
+		mgmt.PATCH("/codex-client-quotas", s.mgmt.PatchCodexClientQuota)
+		mgmt.GET("/deepseek-balance", s.mgmt.GetDeepSeekBalance)
+		mgmt.GET("/deepseek-client-quotas", s.mgmt.GetDeepSeekClientQuotas)
+		mgmt.PATCH("/deepseek-client-quotas", s.mgmt.PatchDeepSeekClientQuota)
+		mgmt.GET("/glm-client-quotas", s.mgmt.GetGLMClientQuotas)
+		mgmt.PATCH("/glm-client-quotas", s.mgmt.PatchGLMClientQuota)
+		mgmt.GET("/glm-plan-quota", s.mgmt.GetGLMPlanQuota)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
 		mgmt.GET("/plugins", s.mgmt.ListPlugins)
 		mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
@@ -90,6 +99,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
+		mgmt.GET("/usage-history/summary", s.getUsageHistorySummary)
+		mgmt.GET("/usage-history/requests", s.getUsageHistoryRequests)
+		mgmt.GET("/clients", s.mgmt.GetClients)
+		mgmt.POST("/clients", s.mgmt.PostClient)
+		mgmt.PATCH("/clients/:id", s.mgmt.PatchClient)
+		mgmt.POST("/clients/:id/rotate", s.mgmt.RotateClientKey)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -333,5 +348,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	if !serveClientQuotaPanel(c, filePath) {
+		c.File(filePath)
+	}
 }

@@ -166,6 +166,11 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
 			if result != nil {
+				provider := directRequestProvider(c.FullPath())
+				if provider != "" && !sdkaccess.ClientAllowsProvider(result.Metadata[sdkaccess.ClientProvidersMetadataKey], provider) {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "This client is not allowed to use the requested provider"})
+					return
+				}
 				c.Set("userApiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
@@ -199,6 +204,17 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 	}
 }
 
+func directRequestProvider(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/v1/realtime"), path == "/v1/live", strings.HasPrefix(path, "/v1/live/"), strings.HasSuffix(path, "/alpha/search"):
+		return "codex"
+	case path == "/v1/videos", strings.HasPrefix(path, "/v1/videos/"), path == "/openai/v1/videos", strings.HasPrefix(path, "/openai/v1/videos/"):
+		return "xai"
+	default:
+		return ""
+	}
+}
+
 func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler) gin.HandlerFunc {
 	fallback := realtimeStandardAuthMiddleware(manager)
 	return func(c *gin.Context) {
@@ -223,6 +239,21 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		provider := authorization.IssuerProvider
 		if provider == "" {
 			provider = "realtime-client-secret"
+		}
+		if manager != nil && provider == sdkaccess.DefaultAccessProviderName {
+			issuerRequest := c.Request.Clone(c.Request.Context())
+			issuerRequest.Header = http.Header{"Authorization": []string{"Bearer " + principal}}
+			issuerRequest.URL.RawQuery = ""
+			issuer, authErr := manager.Authenticate(c.Request.Context(), issuerRequest)
+			if authErr != nil || issuer == nil || issuer.Provider != provider || issuer.Principal != principal || !sdkaccess.ClientAllowsProvider(issuer.Metadata[sdkaccess.ClientProvidersMetadataKey], "codex") {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+					"message": "Realtime client secret is no longer authorized",
+					"type":    "authentication_error",
+					"code":    "invalid_realtime_client_secret",
+				}})
+				return
+			}
+			c.Set("accessMetadata", issuer.Metadata)
 		}
 		c.Set("userApiKey", principal)
 		c.Set("accessProvider", provider)

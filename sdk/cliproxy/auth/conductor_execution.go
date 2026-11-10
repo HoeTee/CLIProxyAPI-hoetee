@@ -16,6 +16,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -116,12 +117,32 @@ func preferredExecutionAttemptError(fallback, upstream error) error {
 	return markUpstreamExecutionAttempt(upstream)
 }
 
+func filterClientExecutionProviders(providers []string, opts cliproxyexecutor.Options) ([]string, error) {
+	allowed, _ := opts.Metadata[sdkaccess.ClientProvidersMetadataKey].(string)
+	if allowed == "" {
+		return providers, nil
+	}
+	filtered := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if sdkaccess.ClientAllowsProvider(allowed, provider) {
+			filtered = append(filtered, provider)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, &Error{Code: "provider_not_allowed", Message: "This client is not allowed to use the requested provider", HTTPStatus: http.StatusForbidden}
+	}
+	return filtered, nil
+}
+
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
-	normalized := m.normalizeProviders(providers)
+	normalized, errPolicy := filterClientExecutionProviders(m.normalizeProviders(providers), opts)
+	if errPolicy != nil {
+		return cliproxyexecutor.Response{}, errPolicy
+	}
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -181,7 +202,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)
-	normalized := m.normalizeProviders(providers)
+	normalized, errPolicy := filterClientExecutionProviders(m.normalizeProviders(providers), opts)
+	if errPolicy != nil {
+		return cliproxyexecutor.Response{}, errPolicy
+	}
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -239,7 +263,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			defer unlockSession()
 		}
 	}
-	normalized := m.normalizeProviders(providers)
+	normalized, errPolicy := filterClientExecutionProviders(m.normalizeProviders(providers), opts)
+	if errPolicy != nil {
+		return nil, errPolicy
+	}
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -328,11 +355,13 @@ func isRequestTerminatedError(err error) bool {
 }
 
 func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	coreusage.ObserveHistoryProvider(ctx, provider)
 	if opts.RequestAfterAuthInterceptor == nil {
 		return req, opts, nil
 	}
 	toFormat := requestToFormat(provider, executor, req, opts)
 	resp := opts.RequestAfterAuthInterceptor(ctx, cliproxyexecutor.RequestAfterAuthInterceptRequest{
+		Provider:       provider,
 		SourceFormat:   opts.SourceFormat,
 		ToFormat:       toFormat,
 		Model:          req.Model,
@@ -610,6 +639,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
+			}
+			if isRequestStopError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: execOpts}
 			if errExec != nil {

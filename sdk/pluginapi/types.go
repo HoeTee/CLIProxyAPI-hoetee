@@ -128,6 +128,41 @@ type Capabilities struct {
 	ManagementAPI ManagementAPI
 	// QuotaProvider surfaces credential quota and billing information for management clients.
 	QuotaProvider QuotaProvider
+	// ClientQuota enforces and records settled usage for downstream clients.
+	ClientQuota ClientQuotaPlugin
+}
+
+// ClientQuotaPlugin checks admission and settles usage synchronously.
+type ClientQuotaPlugin interface {
+	AdmitClientQuota(context.Context, ClientQuotaRequest) (ClientQuotaDecision, error)
+	RecordClientQuota(context.Context, ClientQuotaRecord) error
+	SnapshotClientQuota(context.Context, []string) (map[string]json.RawMessage, error)
+}
+
+type ClientQuotaRequest struct {
+	ClientID string          `json:"client_id"`
+	Policy   json.RawMessage `json:"policy"`
+}
+
+// ClientQuotaDecision uses a zero status to admit the request.
+type ClientQuotaDecision struct {
+	Status  int    `json:"status"`
+	Message string `json:"message"`
+}
+
+type ClientQuotaRecord struct {
+	ClientID string            `json:"client_id"`
+	Usage    *ClientQuotaUsage `json:"usage"`
+}
+
+// ClientQuotaUsage retains the distinction between unknown and zero cached tokens.
+type ClientQuotaUsage struct {
+	Input  int64  `json:"input_tokens"`
+	Output int64  `json:"output_tokens"`
+	Cached *int64 `json:"cached_tokens,omitempty"`
+	Model  string `json:"model,omitempty"`
+	// Created is the upstream response creation time in Unix seconds, when supplied.
+	Created int64 `json:"created,omitempty"`
 }
 
 // ExecutorModelScope declares which model-registration paths a plugin executor supports.
@@ -1052,6 +1087,8 @@ type ResponseTransformRequest struct {
 
 // RequestInterceptRequest describes a request about to be executed upstream.
 type RequestInterceptRequest struct {
+	// Provider identifies the selected upstream credential provider. It is empty before credential selection.
+	Provider string
 	// RequestID uniquely identifies one model execution and correlates it with RequestCompletion.
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available.
@@ -1405,6 +1442,14 @@ type ManagementResponse struct {
 
 // UsageRecord describes request usage and billing metadata.
 type UsageRecord struct {
+	// RequestID correlates the usage event with one inbound request.
+	RequestID string
+	// ClientID is the stable downstream client identity configured by the proxy owner.
+	ClientID string
+	// CodexWeeklyUSD is the client's configured recurring Codex allowance.
+	CodexWeeklyUSD float64
+	// DeepSeekLimitCNY is the client's configured lifetime DeepSeek allowance.
+	DeepSeekLimitCNY float64
 	// Provider identifies the upstream provider.
 	Provider string
 	// BaseURL is the upstream base URL configured for the request/credential when available.
@@ -1478,6 +1523,8 @@ type UsageDetail struct {
 	CachedTokens int64
 	// CacheReadTokens is the cache read token count.
 	CacheReadTokens int64
+	// CacheMissTokens is the explicitly reported cache miss input token count.
+	CacheMissTokens int64
 	// CacheCreationTokens is the cache creation token count.
 	CacheCreationTokens int64
 	// TotalTokens is the total token count.

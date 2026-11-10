@@ -17,11 +17,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/glmquota"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -40,13 +42,19 @@ const (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider string
-	cfg      *config.Config
+	provider       string
+	cfg            *config.Config
+	glmQuotaPlugin func() pluginapi.ClientQuotaPlugin
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
+}
+
+// SetGLMQuotaPlugin binds the quota capability lookup before the executor is registered.
+func (e *OpenAICompatExecutor) SetGLMQuotaPlugin(lookup func() pluginapi.ClientQuotaPlugin) {
+	e.glmQuotaPlugin = lookup
 }
 
 // Identifier implements cliproxyauth.ProviderExecutor.
@@ -88,6 +96,9 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
+		if e.provider == glmquota.ProviderKey {
+			return resp, glmquota.QuotaError{Message: "GLM Coding Plan supports chat generation only", Status: http.StatusBadRequest}
+		}
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
 
@@ -107,6 +118,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
 	if opts.Alt == "responses/compact" {
+		if e.provider == glmquota.ProviderKey {
+			return resp, glmquota.QuotaError{Message: "GLM Coding Plan does not support native compaction", Status: http.StatusBadRequest}
+		}
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
@@ -180,6 +194,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	recordGLMUsage, err := helps.AdmitGLMRequest(ctx, e.provider, e.cfg, opts, e.glmQuotaPlugin)
+	if err != nil {
+		return resp, err
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -199,6 +217,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
+	if recordGLMUsage != nil {
+		var usage *glmquota.Usage
+		if err == nil {
+			usage = glmquota.ParseUsage(body)
+		}
+		recordGLMUsage(usage)
+	}
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -311,6 +336,9 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
+		if e.provider == glmquota.ProviderKey {
+			return nil, glmquota.QuotaError{Message: "GLM Coding Plan supports chat generation only", Status: http.StatusBadRequest}
+		}
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
 	}
 
@@ -398,6 +426,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
+	recordGLMUsage, err := helps.AdmitGLMRequest(ctx, e.provider, e.cfg, opts, e.glmQuotaPlugin)
+	if err != nil {
+		return nil, err
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -433,6 +465,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var upstreamEvent string
 		var frameData [][]byte
 		defer streamUsage.Publish(ctx, reporter)
+		var glmUsage glmquota.ResponseUsage
+		if recordGLMUsage != nil {
+			defer func() { recordGLMUsage(glmUsage.Result()) }()
+		}
 
 		publishStreamError := func(streamErr statusErr, containsPayload bool) {
 			loggedErr := streamErr
@@ -483,6 +519,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if streamErr, isError := openAICompatStreamDataError(dataPayload, eventName); isError {
 					publishStreamError(streamErr, true)
 					return true
+				}
+				if recordGLMUsage != nil {
+					glmUsage.Observe(dataPayload)
 				}
 			}
 
@@ -932,6 +971,9 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 	if auth.Attributes != nil {
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	if e.provider == glmquota.ProviderKey {
+		apiKey = glmquota.Credential(baseURL, apiKey)
 	}
 	return
 }

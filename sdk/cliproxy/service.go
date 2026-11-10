@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
@@ -76,7 +77,8 @@ type Service struct {
 	serverErr chan error
 
 	// watcher handles file system monitoring.
-	watcher *WatcherWrapper
+	watcher      *WatcherWrapper
+	watcherReady atomic.Bool
 
 	// watcherCancel cancels the watcher context.
 	watcherCancel context.CancelFunc

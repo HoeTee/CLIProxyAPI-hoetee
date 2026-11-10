@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,10 @@ import (
 )
 
 type UsageReporter struct {
+	requestID           string
+	clientID            string
+	codexWeeklyUSD      float64
+	deepseekLimitCNY    float64
 	provider            string
 	baseURL             string
 	executorType        string
@@ -81,6 +86,7 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	clientID, codexWeeklyUSD, deepseekLimitCNY := ClientQuotaFromContext(ctx)
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -107,20 +113,24 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		}
 	}
 	reporter := &UsageReporter{
-		provider:        provider,
-		baseURL:         baseURL,
-		model:           model,
-		alias:           strings.TrimSpace(alias),
-		requestedAt:     time.Now(),
-		apiKey:          apiKey,
-		sessionID:       sessionID,
-		parentSessionID: parentSessionID,
-		source:          resolveUsageSource(auth, apiKey),
-		authType:        resolveUsageAuthType(auth),
-		reasoning:       usage.ReasoningEffortFromContext(ctx),
-		serviceTier:     usage.ServiceTierFromContext(ctx),
-		generate:        usage.GenerateFromContext(ctx),
-		stream:          usage.StreamFromContext(ctx),
+		requestID:        internallogging.GetRequestID(ctx),
+		clientID:         clientID,
+		codexWeeklyUSD:   codexWeeklyUSD,
+		deepseekLimitCNY: deepseekLimitCNY,
+		provider:         provider,
+		baseURL:          baseURL,
+		model:            model,
+		alias:            strings.TrimSpace(alias),
+		requestedAt:      time.Now(),
+		apiKey:           apiKey,
+		sessionID:        sessionID,
+		parentSessionID:  parentSessionID,
+		source:           resolveUsageSource(auth, apiKey),
+		authType:         resolveUsageAuthType(auth),
+		reasoning:        usage.ReasoningEffortFromContext(ctx),
+		serviceTier:      usage.ServiceTierFromContext(ctx),
+		generate:         usage.GenerateFromContext(ctx),
+		stream:           usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -555,6 +565,7 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.ReasoningTokens != 0 ||
 		detail.CachedTokens != 0 ||
 		detail.CacheReadTokens != 0 ||
+		detail.CacheMissTokens != 0 ||
 		detail.CacheCreationTokens != 0 ||
 		detail.TotalTokens != 0 ||
 		detail.TokenBreakdown.TotalTokens != 0
@@ -607,6 +618,10 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		responseModel = r.ResponseModel()
 	}
 	return usage.Record{
+		RequestID:           r.requestID,
+		ClientID:            r.clientID,
+		CodexWeeklyUSD:      r.codexWeeklyUSD,
+		DeepSeekLimitCNY:    r.deepseekLimitCNY,
 		Provider:            r.provider,
 		BaseURL:             r.baseURL,
 		ExecutorType:        r.executorType,
@@ -759,6 +774,32 @@ func APIKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+// ClientQuotaFromContext returns authenticated client metadata without exposing the API key.
+func ClientQuotaFromContext(ctx context.Context) (string, float64, float64) {
+	if ctx == nil {
+		return "", 0, 0
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return "", 0, 0
+	}
+	raw, exists := ginCtx.Get("accessMetadata")
+	if !exists {
+		return "", 0, 0
+	}
+	metadata, ok := raw.(map[string]string)
+	if !ok {
+		return "", 0, 0
+	}
+	parse := func(key string) float64 {
+		value, _ := strconv.ParseFloat(strings.TrimSpace(metadata[key]), 64)
+		return value
+	}
+	return strings.TrimSpace(metadata[cliproxyexecutor.ClientIDMetadataKey]),
+		parse(cliproxyexecutor.CodexWeeklyUSDMetadataKey),
+		parse(cliproxyexecutor.DeepSeekLimitCNYMetadataKey)
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
@@ -980,6 +1021,8 @@ func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
 		usageNode.Get("input_tokens").Exists() ||
 		usageNode.Get("completion_tokens").Exists() ||
 		usageNode.Get("output_tokens").Exists() ||
+		usageNode.Get("prompt_cache_hit_tokens").Exists() ||
+		usageNode.Get("prompt_cache_miss_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
 		usageNode.Get("prompt_tokens_details.cache_write_tokens").Exists() ||
@@ -1004,6 +1047,12 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		OutputTokens: outputNode.Int(),
 		TotalTokens:  usageNode.Get("total_tokens").Int(),
 	}
+	if inputNode.Type == gjson.Number {
+		detail.TokenFields |= usage.ReportedInput
+	}
+	if outputNode.Type == gjson.Number {
+		detail.TokenFields |= usage.ReportedOutput
+	}
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
 		cached = usageNode.Get("input_tokens_details.cached_tokens")
@@ -1011,6 +1060,19 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
 		detail.CacheReadTokens = cached.Int()
+		if cached.Type == gjson.Number {
+			detail.TokenFields |= usage.ReportedCacheRead
+		}
+	}
+	if cacheHit := usageNode.Get("prompt_cache_hit_tokens"); cacheHit.Exists() {
+		detail.CachedTokens = cacheHit.Int()
+		detail.CacheReadTokens = cacheHit.Int()
+		if cacheHit.Type == gjson.Number {
+			detail.TokenFields |= usage.ReportedCacheRead
+		}
+	}
+	if cacheMiss := usageNode.Get("prompt_cache_miss_tokens"); cacheMiss.Exists() {
+		detail.CacheMissTokens = cacheMiss.Int()
 	}
 	cacheCreation := firstExistingUsageNode(
 		usageNode,

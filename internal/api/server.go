@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagehistory"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -80,7 +81,8 @@ type Server struct {
 	wsAuthEnabled atomic.Bool
 
 	// management handler
-	mgmt *managementHandlers.Handler
+	mgmt         *managementHandlers.Handler
+	usageHistory *usagehistory.Store
 
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
@@ -183,6 +185,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
+	if optionState.usageHistoryPath != "" && !cfg.Home.Enabled {
+		store, errOpen := usagehistory.Open(optionState.usageHistoryPath)
+		if errOpen != nil {
+			log.WithError(errOpen).Error("usage history: could not open database")
+		} else {
+			s.usageHistory = store
+			s.handlers.SetUsageHistoryRecorder(store)
+			s.importUsageHistory(cfg)
+		}
+	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
@@ -203,7 +215,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	s.mgmt.SetPluginHost(optionState.pluginHost)
-	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)
+	s.mgmt.SetConfigReloadHook(optionState.configReloadHook, optionState.configReloadReady)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -397,6 +409,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	errShutdown := s.server.Shutdown(ctx)
 	if s.codexLiveHandler != nil {
 		s.codexLiveHandler.Close()
+	}
+	if s.usageHistory != nil {
+		if errClose := s.usageHistory.Close(); errClose != nil {
+			log.WithError(errClose).Warn("usage history: could not close database")
+		}
 	}
 	if errShutdown != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errShutdown)

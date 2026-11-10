@@ -12,6 +12,10 @@ type Config = internalconfig.Config
 
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
+type ClientConfig = internalconfig.ClientConfig
+type ClientQuotas = internalconfig.ClientQuotas
+type CodexClientQuota = internalconfig.CodexClientQuota
+type DeepSeekClientQuota = internalconfig.DeepSeekClientQuota
 type TLSConfig = internalconfig.TLSConfig
 type DiscoveryConfig = internalconfig.DiscoveryConfig
 type DiscoveryInterfacesConfig = internalconfig.DiscoveryInterfacesConfig

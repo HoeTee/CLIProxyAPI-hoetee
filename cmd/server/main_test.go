@@ -42,6 +42,9 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 			APIKeys: []string{"real-key"},
 		},
 	}
+	cfgWithExampleClient := &config.Config{SDKConfig: config.SDKConfig{
+		Clients: []config.ClientConfig{{ID: "alice", APIKey: "your-api-key-1"}},
+	}}
 
 	tests := []struct {
 		name               string
@@ -95,6 +98,11 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 			name: "normal server with real key",
 			cfg:  cfgWithRealKey,
 			want: false,
+		},
+		{
+			name: "normal server with example client key",
+			cfg:  cfgWithExampleClient,
+			want: true,
 		},
 		{
 			name: "nil config",

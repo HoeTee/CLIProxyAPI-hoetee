@@ -52,6 +52,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errValidate := cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, errValidate
 	}
+	if errValidate := cfg.ValidateClients(); errValidate != nil {
+		return nil, errValidate
+	}
 	if cfg.Discovery.ServiceType == "" {
 		cfg.Discovery.ServiceType = DefaultDiscoveryServiceType
 	}

@@ -136,7 +136,15 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ## 使用量统计
 
-自v6.10.0版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
+本项目的管理面板内置「用量历史」。从 Dashboard 的供应商卡片进入，或在侧栏直接打开「用量历史」，可按日期、客户端、供应商、模型和结果查询请求。图表支持悬停查看 Token 和调用次数，点击柱子可筛选下方明细。「客户端」可发放、轮换或停用 Key，并设置供应商权限和本地配额。
+
+Docker Compose 将 SQLite 数据库存放在 `usage-history` 数据卷的 `/CLIProxyAPI/data/usage.sqlite`，默认保留 13 个月。重建容器会保留数据卷；`docker compose down -v` 会删除它。旧插件账本只回填有记录的 Token，调用次数从启用历史记录之日开始统计。额度规则和插件账本仍由各供应商插件管理。
+
+按客户端归集用量需要使用 `config.yaml` 的 `clients` 或在面板新建客户端。旧的 `api-keys` 仍可调用，但没有可供归集的客户端 ID。面板签发的 Key 只显示一次，配置文件保存它的 SHA-256 摘要。
+
+自定义页面使用 CPAMC v1.24.2 的面板文件。迁移到另一台机器时，一并复制 `static/management.html`，挂载到容器的 `/CLIProxyAPI/static`，并保持 `remote-management.disable-auto-update-panel: true`。
+
+上游 CLIProxyAPI 自 v6.10.0 起不再预置数据统计。其他工具包括：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 

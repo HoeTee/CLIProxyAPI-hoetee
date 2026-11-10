@@ -44,6 +44,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, true))
 	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, true, execOptions)
 	lifecycle := h.newRequestLifecycleTracker(execCtx, entryProtocol, modelName, originalRequestedModel, true, opts.Metadata, execOptions.SkipInterceptorPluginID)
+	execCtx = h.observeHistory(execCtx, lifecycle, executorPluginID)
 	var interceptErr *interfaces.ErrorMessage
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(execCtx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
@@ -149,8 +150,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		completionStatus := http.StatusOK
 		var completionErr error
 		var streamUsage helps.StreamUsageBuffer
-		defer func() {
-			lifecycle.complete(completionOutcome, completionStatus, completionErr)
+		publishUsage := func() {
 			if reporter != nil && !nestedTracker.hasNestedExecution() {
 				if completionOutcome != pluginapi.RequestCompletionSucceeded && completionErr != nil {
 					if !streamUsage.PublishFailure(execCtx, reporter, completionErr) {
@@ -161,9 +161,21 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					reporter.EnsurePublished(execCtx)
 				}
 			}
+		}
+		defer func() {
+			lifecycle.complete(completionOutcome, completionStatus, completionErr)
+			if lifecycle.history == nil {
+				publishUsage()
+			}
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		if lifecycle.history != nil {
+			defer func() {
+				publishUsage()
+				lifecycle.completeHistory(completionOutcome, completionStatus, completionErr)
+			}()
+		}
 		chunkIndex := 0
 		var historyChunks [][]byte
 		for {
@@ -335,6 +347,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, true, reqMeta, execOptions.SkipInterceptorPluginID)
+	ctx = h.observeHistory(ctx, lifecycle, providers...)
 	opts := coreexecutor.Options{
 		Stream:                      true,
 		Alt:                         alt,
@@ -610,6 +623,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		defer func() { lifecycle.completeHistory(completionOutcome, completionStatus, completionErr) }()
 		if streamCanceledBeforeRead {
 			completionOutcome = pluginapi.RequestCompletionCanceled
 			completionStatus = 0

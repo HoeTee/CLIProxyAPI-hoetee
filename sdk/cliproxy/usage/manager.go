@@ -20,7 +20,11 @@ const AutoServiceTier = "auto"
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider string
+	RequestID        string
+	ClientID         string
+	CodexWeeklyUSD   float64
+	DeepSeekLimitCNY float64
+	Provider         string
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
@@ -71,11 +75,13 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
+	TokenFields         ReportedTokenFields `json:"-"`
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64
 	CachedTokens        int64
 	CacheReadTokens     int64
+	CacheMissTokens     int64
 	CacheCreationTokens int64
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
@@ -411,7 +417,10 @@ func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
 
 // PublishRecord publishes a record using the default manager.
-func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }
+func PublishRecord(ctx context.Context, record Record) {
+	DefaultManager().Publish(ctx, record)
+	observeHistoryTokens(ctx, record)
+}
 
 // StartDefault starts the default manager's dispatcher.
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }

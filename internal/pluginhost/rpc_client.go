@@ -165,6 +165,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.ManagementAPI {
 		plugin.Capabilities.ManagementAPI = adapter
 	}
+	if resp.Capabilities.ClientQuota {
+		plugin.Capabilities.ClientQuota = adapter
+	}
 	if resp.Capabilities.QuotaProvider {
 		if err := ctx.Err(); err != nil {
 			return pluginapi.Plugin{}, err
@@ -179,6 +182,19 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		}
 	}
 	return plugin, nil
+}
+
+func (a *rpcPluginAdapter) AdmitClientQuota(ctx context.Context, req pluginapi.ClientQuotaRequest) (pluginapi.ClientQuotaDecision, error) {
+	return callPlugin[pluginapi.ClientQuotaDecision](ctx, a.client, pluginabi.MethodClientQuotaAdmit, req)
+}
+
+func (a *rpcPluginAdapter) RecordClientQuota(ctx context.Context, req pluginapi.ClientQuotaRecord) error {
+	_, err := callPlugin[struct{}](ctx, a.client, pluginabi.MethodClientQuotaRecord, req)
+	return err
+}
+
+func (a *rpcPluginAdapter) SnapshotClientQuota(ctx context.Context, clients []string) (map[string]json.RawMessage, error) {
+	return callPlugin[map[string]json.RawMessage](ctx, a.client, pluginabi.MethodClientQuotaSnapshot, clients)
 }
 
 func callPlugin[T any](ctx context.Context, client pluginClient, method string, request any) (T, error) {

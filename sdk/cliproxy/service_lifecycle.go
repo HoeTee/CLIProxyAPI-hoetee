@@ -203,6 +203,7 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		log.Info("file watcher started for config and auth directory changes")
 		s.syncPluginModelRuntime(ctx)
+		s.watcherReady.Store(watcherWrapper.reloadConfigIfChanged != nil)
 	}
 
 	s.registerModelRefreshCallback()
@@ -231,6 +232,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	var shutdownErr error
 	s.shutdownOnce.Do(func() {
+		s.watcherReady.Store(false)
 		if ctx == nil {
 			ctx = context.Background()
 		}

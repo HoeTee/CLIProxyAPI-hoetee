@@ -53,6 +53,16 @@ func (h *Host) activeRecords() []capabilityRecord {
 	return h.activeRecordsFromSnapshot(h.Snapshot())
 }
 
+// ClientQuotaPlugin returns the active quota capability for a configured plugin ID.
+func (h *Host) ClientQuotaPlugin(id string) pluginapi.ClientQuotaPlugin {
+	for _, record := range h.activeRecords() {
+		if record.id == id && !h.isPluginFused(id) {
+			return record.plugin.Capabilities.ClientQuota
+		}
+	}
+	return nil
+}
+
 func (h *Host) activeRecordsFromSnapshot(snap *Snapshot) []capabilityRecord {
 	if snap == nil || len(snap.records) == 0 {
 		return nil

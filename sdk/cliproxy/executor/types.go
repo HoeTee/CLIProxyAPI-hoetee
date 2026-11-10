@@ -31,6 +31,13 @@ const ServiceTierMetadataKey = "service_tier"
 // Missing or true means generation is enabled; only an explicit false disables generation.
 const GenerateMetadataKey = "generate"
 
+// Client identity and quota metadata are populated by frontend authentication.
+const (
+	ClientIDMetadataKey         = "client_id"
+	CodexWeeklyUSDMetadataKey   = "codex_weekly_usd"
+	DeepSeekLimitCNYMetadataKey = "deepseek_limit_cny"
+)
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
@@ -103,6 +110,8 @@ type RequestAfterAuthInterceptor func(context.Context, RequestAfterAuthIntercept
 
 // RequestAfterAuthInterceptRequest describes a selected-auth request before executor translation.
 type RequestAfterAuthInterceptRequest struct {
+	// Provider identifies the selected upstream credential provider.
+	Provider string
 	// SourceFormat is the original client protocol format.
 	SourceFormat sdktranslator.Format
 	// ToFormat is the selected upstream protocol format.

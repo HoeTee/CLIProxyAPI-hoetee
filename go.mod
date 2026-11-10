@@ -18,6 +18,7 @@ require (
 	github.com/klauspost/compress v1.17.4
 	github.com/libp2p/zeroconf/v2 v2.2.0
 	github.com/minio/minio-go/v7 v7.0.66
+	github.com/ncruces/go-sqlite3 v0.30.0
 	github.com/pion/ice/v4 v4.3.0
 	github.com/pion/interceptor v0.1.45
 	github.com/pion/rtp v1.10.4
@@ -45,6 +46,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.1 // indirect
 	github.com/miekg/dns v1.1.43 // indirect
+	github.com/ncruces/julianday v1.0.0 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/logging v0.2.4 // indirect
@@ -56,6 +58,7 @@ require (
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
+	github.com/tetratelabs/wazero v1.9.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

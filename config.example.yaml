@@ -41,6 +41,23 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Named clients are an alternative to api-keys for per-provider quotas.
+# Configure a managed key here only; do not repeat it under api-keys or plugin settings.
+# The management page writes api-key-sha256 instead of api-key for keys it generates.
+# clients:
+#   - id: "user-a"
+#     api-key: "client-key-a"
+#     disabled: false
+#     allowed-providers: [codex, deepseek, glm-coding-plan] # Omit for unrestricted access.
+#     quotas:
+#       codex:
+#         weekly-usd: 50.00
+#       deepseek:
+#         limit-cny: 100.00
+#       glm:
+#         five-hour-tokens: 20000 # null means unlimited; usage is still recorded
+#         weekly-tokens: 100000 # resets Monday at 00:00 Asia/Shanghai
+
 # Enable debug logging
 debug: false
 
@@ -119,6 +136,10 @@ plugins:
   #     type: bearer
   #     token-env: "CLIPROXY_PLUGIN_STORE_TOKEN"
   configs:
+    # glm-key-quota:
+    #   enabled: true
+    #   storage:
+    #     path: "logs/glm-coding-plan/usage.ndjson"
     example:
       enabled: true
       priority: 1
@@ -734,6 +755,18 @@ nonstream-keepalive-interval: 0
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers
+# GLM Coding Plan (China) requires glm-key-quota, the provider name below, and a client with quotas.glm.
+# Set GLM_CODING_PLAN_API_KEY in the server environment, or configure one api-key-entry.
+# The GLM dashboard displays the plan for the first configured credential.
+# openai-compatibility:
+#   - name: "glm-coding-plan"
+#     base-url: "https://open.bigmodel.cn/api/coding/paas/v4"
+#     models:
+#       - name: "glm-5.3"
+#         alias: "glm-5.3"
+#       - name: "glm-5.3-flash"
+#         alias: "glm-5.3-flash"
+#
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     disabled: false # optional: set to true to disable this provider without removing it
